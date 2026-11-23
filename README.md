@@ -1,0 +1,152 @@
+<p align="center">
+  <img src="docs/banner.png" alt="Spelunkr for Apple TV" width="100%">
+</p>
+
+# Spelunkr for Apple TV
+
+**Cable TV, but weirder, on your Apple TV.** An unofficial tvOS app for [spelunkr.tv](https://spelunkr.tv), the free site that turns forgotten Internet Archive videos into 37 synchronized, 24/7 "cable" channels. Every channel lands on the same tape at the same second as the website.
+
+> **Unofficial.** This project is not affiliated with, endorsed by, or sponsored by spelunkr.tv. Spelunkr's own site lists Apple TV as unsupported (its official app targets Android TV, Google TV and Fire TV). This is an independent hobby project that fills that gap.
+>
+> All programming streams from the [Internet Archive](https://archive.org). Please consider [donating to the Internet Archive](https://archive.org/donate) and [supporting spelunkr on Ko-fi](https://ko-fi.com/spelunkrtv). Questions about spelunkr itself belong on the [spelunkr Discord](https://discord.gg/QhtW9DcRR3). If you plan to distribute this app publicly (TestFlight links, App Store, shared builds), ask spelunkr's creator first.
+
+## Features
+
+- All of spelunkr's channels, with a channel guide showing what is on now and what is next
+- Same schedule as the website: your TV and the browser show the same tape at the same moment
+- Live-TV channel surfing with the Siri Remote (up and down to change channels)
+- Bump and station-ID cards between shows, with spelunkr's music
+- Overlay music channels (such as Vacation Slides), including the faint projector hum
+- Picture fixes from the site: squeezed tapes are stretched back to their real shape, and tapes with a baked-in black border are zoomed to fill the screen
+- Static and a message when a channel has nothing scheduled or a tape will not play, then it tunes again at the next show
+
+## How it works
+
+```mermaid
+flowchart LR
+    A["lineup.json + channel manifests<br/>(data.spelunkr.tv, fallback spelunkr.tv/broadcast/)"] --> B["spelunkr's schedule engine<br/>running in JavaScriptCore"]
+    B -->|"what is on now, and how far in"| C["AVPlayer seeks to the<br/>broadcast position"]
+    D["archive.org download URLs"] --> C
+    E["Bump cards + music<br/>(audio.spelunkr.tv)"] --> C
+```
+
+- **Lineup and schedules:** the app loads `lineup.json` and a manifest per channel from `data.spelunkr.tv`, falling back to `spelunkr.tv/broadcast/` if that fails.
+- **Same schedule as the website:** the site's own schedule engine runs inside JavaScriptCore (Apple's built-in JS engine), so "what is on right now, and how far into it" is computed exactly the way the site does it.
+- **Playback:** AVPlayer opens the current show and seeks to the broadcast position. While it plays, the app checks once a second and quietly re-seeks if the picture drifts more than 3 seconds from the broadcast clock (at most once every 20 seconds). A "TRACKING..." label shows while the tape buffers.
+- **Video source:** Internet Archive download URLs (archive.org), streamed directly. Nothing is proxied or re-hosted.
+- **Bumps and station IDs:** between shows, cards (channel name, slides, SPELUNKR, "up next") appear with music from `audio.spelunkr.tv`, timed like the site's own cards.
+- **Overlay music:** on channels such as Vacation Slides, the tapes are silent and a playlist of public-domain tracks plays over them, plus a faint projector hum. The playlist is shuffled with the site's seeded generator, so you hear the same track at the same moment as everyone else. If a track will not play, the app moves to a stand-in like the site does.
+- **Picture fixes:** `AspectFixes.swift` loads the site's `stretch.json` and `zoom.json`. It also downloads `crop43.json`, which only matters for the site's optional CRT mode, so the app does not apply it.
+
+## Requirements
+
+- A Mac with **Xcode 16 or newer** (the project uses Xcode 16's file-system-synchronized folders)
+- **Node.js 18 or newer** (to generate the schedule engine, see below)
+- An Apple ID (a free one is fine)
+- The Apple TV simulator, or an Apple TV HD / Apple TV 4K on **tvOS 17 or later**
+
+## Quick start
+
+1. **Clone the repository.**
+
+   ```sh
+   git clone https://github.com/bradenqueen/spelunkr-tv.git
+   cd spelunkr-tv
+   ```
+
+2. **Generate the schedule engine.** Do this before building; without it the app builds but cannot tell what's on.
+
+   ```sh
+   node tools/update-engine.mjs
+   ```
+
+   The script downloads spelunkr.tv's current JavaScript, extracts its schedule engine, smoke-tests it against the live lineup, and writes `SpelunkrTV/Engine/spelunkr-engine.js.txt`.
+
+   **Why is this a separate step?** That file contains code copied from spelunkr.tv's own bundle, which is not under a license that allows redistribution, so it is deliberately not committed to this repository. Generating it locally also means you always get the version that matches the live site.
+
+3. **Open the project in Xcode and run it.**
+   1. Open `SpelunkrTV.xcodeproj`.
+   2. Select the **SpelunkrTV** target, then **Signing & Capabilities**.
+   3. Choose a **Team** (a free personal Apple ID team works). If Xcode says the bundle identifier is taken, change it to something unique (the project currently uses `net.zerph.spelunkrtv`).
+   4. Pick an Apple TV simulator as the run destination and press Run. Try the simulator first.
+
+If the app starts but says "The schedule engine is missing from the app", step 2 was skipped or the file was not generated.
+
+## Installing on a real Apple TV
+
+1. On the Apple TV: **Settings > Remotes and Devices > Remote App and Devices**. Leave that screen open.
+2. In Xcode: **Window > Devices and Simulators**. Your Apple TV should appear under Discovered (it must be on the same network). Click it, then enter the code shown on the TV.
+3. Select the Apple TV as the run destination and press Run.
+4. If prompted, enable **Developer Mode** on the Apple TV (newer tvOS versions require it) and restart when asked.
+
+| | Free Apple ID | Apple Developer Program ($99/year) |
+|---|---|---|
+| App validity | Expires after 7 days; re-run from Xcode to refresh | 1-year provisioning |
+| Number of apps | Limited | Much higher |
+| Installing without Xcode | No | Yes, via TestFlight |
+
+## Remote controls
+
+**Guide**
+- Swipe or use arrows to pick a channel (the guide shows what is on now and what is next)
+- Click to watch
+- Menu/Back: leave the app
+
+**Watching**
+- Up / down: change channel (up = next higher channel number, wrapping around)
+- Left / right, click or Play/Pause: show the info banner (channel, title, time left, what is next)
+- Menu/Back: return to the guide (the guide reopens with that channel highlighted)
+
+## Keeping in sync when spelunkr changes
+
+If spelunkr changes its schedule format, the guide shows an **orange warning**. To fix it, re-run the generator and rebuild:
+
+```sh
+node tools/update-engine.mjs   # Node 18+
+```
+
+The script re-extracts the engine from the live site, smoke-tests it against the live lineup (the first six channels, plus every overlay-music channel, whose playlist code is cross-checked against the site's), and rewrites `SpelunkrTV/Engine/spelunkr-engine.js.txt`.
+
+If the script reports a new engine number, also raise `supportedEngine` in `SpelunkrTV/BroadcastStore.swift` so the warning goes away. Then rebuild in Xcode.
+
+The file ends in `.txt` so Xcode copies it as a plain resource instead of trying to compile it as source. The app reads it at runtime and hands it to JavaScriptCore.
+
+## Project layout
+
+| Path | What it does |
+|---|---|
+| `SpelunkrTV/SpelunkrTVApp.swift` | App entry point, audio session, root view (guide, player or static screen) |
+| `SpelunkrTV/Models.swift` | Data types for the lineup, channels, what is on air, overlay music and guide entries, plus small helpers |
+| `SpelunkrTV/BroadcastStore.swift` | Fetches lineup and manifests (with fallback), feeds the engine, keeps the guide fresh, holds app state |
+| `SpelunkrTV/ScheduleEngine.swift` | Runs the site's schedule engine in JavaScriptCore |
+| `SpelunkrTV/TVPlayer.swift` | Playback: tuning, seek to broadcast position, drift correction, card music, overlay music, projector hum, Internet Archive URLs |
+| `SpelunkrTV/AspectFixes.swift` | The site's stretch / zoom maps and the geometry that applies them |
+| `SpelunkrTV/Views/GuideView.swift` | Channel guide |
+| `SpelunkrTV/Views/PlayerScreen.swift` | Full-screen playback, channel changing, info banner, video layer |
+| `SpelunkrTV/Views/BumpCardView.swift` | Bump and station-ID cards, and the static screen |
+| `SpelunkrTV/Engine/spelunkr-engine.js.txt` | The extracted site schedule engine (generated locally, not in git) |
+| `SpelunkrTV/Assets.xcassets` | App icon, Top Shelf images, accent color |
+| `tools/update-engine.mjs` | Downloads, extracts and tests the engine from the live site |
+| `tools/glue.js` | Glue code that exposes the engine to Swift (what is on now, the guide, overlay music); bundled into the generated engine file |
+| `docs/` | Images used by this README |
+
+## Known limitations
+
+- **Not yet built on real hardware** at the time of writing. The project was written without access to a Mac, so expect to fix a small build error or two on the first compile.
+- The app depends on spelunkr's **unofficial, undocumented data feeds**, which can change at any time.
+- Some old Internet Archive uploads use formats Apple TV cannot play. The app shows a card and waits for the next show.
+- The first tune can take a few seconds while archive.org starts streaming.
+- No on-screen playback controls: live TV cannot be paused or scrubbed.
+- No Chromecast or AirPlay controls.
+
+## Credits
+
+- **[spelunkr.tv](https://spelunkr.tv) and its creator** for the channels, the schedule engine, the curation and the idea. Join the [spelunkr Discord](https://discord.gg/QhtW9DcRR3) and support them on [Ko-fi](https://ko-fi.com/spelunkrtv).
+- **The [Internet Archive](https://archive.org)** and the people who uploaded and preserved every tape. [Donate here](https://archive.org/donate).
+- **The bumper music artists** credited in spelunkr's own data, whose tracks play on cards and overlay channels.
+
+Built by Braden Queen ([@bradenqueen](https://github.com/bradenqueen), [bradenqueen.com](https://bradenqueen.com)).
+
+## License
+
+The code in this repository is released under the [MIT License](LICENSE) (c) 2026 Braden Queen. The license covers this repository's code only. It does not cover spelunkr.tv's code or data (which `tools/update-engine.mjs` downloads), the Internet Archive's media, or the bumper music.

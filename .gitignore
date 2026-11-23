@@ -1,0 +1,15 @@
+# Generated locally by tools/update-engine.mjs. Contains code copied from
+# spelunkr.tv's JavaScript bundle (unlicensed), so it is never committed.
+SpelunkrTV/Engine/spelunkr-engine.js.txt
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+
+# macOS
+.DS_Store
+
+# Node
+node_modules/
