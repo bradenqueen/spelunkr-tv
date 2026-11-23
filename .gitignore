@@ -2,11 +2,16 @@
 # spelunkr.tv's JavaScript bundle (unlicensed), so it is never committed.
 SpelunkrTV/Engine/spelunkr-engine.js.txt
 
-# Xcode
+# Downloaded locally by tools/fetch-fonts.mjs (license unknown, never committed).
+SpelunkrTV/Fonts/
+
+# Xcode & IPA builds
 xcuserdata/
 *.xcuserstate
 DerivedData/
 build/
+*.ipa
+Payload/
 
 # macOS
 .DS_Store
