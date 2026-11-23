@@ -26,10 +26,17 @@ struct GuideGrid: View {
     }
 
     var body: some View {
+        TimelineView(.everyMinute) { context in
+            let nowMs = context.date.timeIntervalSince1970 * 1000
+            grid(startingAt: max(windowStartMs, Self.currentHalfHourMs(from: nowMs)), nowMs: nowMs)
+        }
+    }
+
+    private func grid(startingAt windowStartMs: Double, nowMs: Double) -> some View {
         let windowEndMs = windowStartMs + Self.windowDurationMs
 
-        VStack(spacing: 0) {
-            timeHeader(windowStartMs: windowStartMs, windowEndMs: windowEndMs)
+        return VStack(spacing: 0) {
+            timeHeader(windowStartMs: windowStartMs, windowEndMs: windowEndMs, nowMs: nowMs)
 
             ScrollViewReader { proxy in
                 ScrollView(.vertical) {
@@ -41,12 +48,11 @@ struct GuideGrid: View {
                                 isSelectedRow: selectedChannel?.id == channel.id,
                                 windowStartMs: windowStartMs,
                                 windowEndMs: windowEndMs,
+                                nowMs: nowMs,
                                 focusedCell: $focusedCell,
                                 onRowFocused: { ch, block in
-                                    if selectedChannel?.id != ch.id {
-                                        selectedChannel = ch
-                                        inspectedBlock = nil
-                                    } else if let block, !block.isAiring(atMs: Date.nowMs) {
+                                    selectedChannel = ch
+                                    if let block, !block.isAiring(atMs: Date.nowMs) {
                                         inspectedBlock = block
                                     } else {
                                         inspectedBlock = nil
@@ -87,10 +93,9 @@ struct GuideGrid: View {
 
     // MARK: - Time Header
 
-    private func timeHeader(windowStartMs: Double, windowEndMs: Double) -> some View {
+    private func timeHeader(windowStartMs: Double, windowEndMs: Double, nowMs: Double) -> some View {
         let hours = hourlyTicks(from: windowStartMs, to: windowEndMs)
         let total = store.presence.totalViewers
-        let nowMs = Date.nowMs
 
         return HStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -176,7 +181,7 @@ struct GuideGrid: View {
 
     private func shiftWindow(bySteps steps: Int) {
         let floorMs = Self.currentHalfHourMs()
-        let next = max(floorMs, windowStartMs + Double(steps) * Self.stepMs)
+        let next = max(floorMs, max(floorMs, windowStartMs) + Double(steps) * Self.stepMs)
         if next != windowStartMs {
             windowStartMs = next
         }
@@ -192,6 +197,7 @@ private struct GuideGridRow: View {
     let isSelectedRow: Bool
     let windowStartMs: Double
     let windowEndMs: Double
+    let nowMs: Double
     var focusedCell: FocusState<GuideGrid.GridCellID?>.Binding
     let onRowFocused: (ChannelInfo, GuideBlock?) -> Void
     let onCellActivate: (ChannelInfo, GuideBlock) -> Void
@@ -253,7 +259,6 @@ private struct GuideGridRow: View {
             // Proportional program cells
             GeometryReader { geo in
                 let totalMs = max(1, windowEndMs - windowStartMs)
-                let nowMs = Date.nowMs
 
                 ZStack(alignment: .leading) {
                     rowBg
@@ -279,7 +284,7 @@ private struct GuideGridRow: View {
                             let clampedEnd = min(block.endMs, windowEndMs)
                             let leftX = geo.size.width * ((clampedStart - windowStartMs) / totalMs)
                             let rawWidth = geo.size.width * (max(0, clampedEnd - clampedStart) / totalMs)
-                            let width = max(56, rawWidth - 2)
+                            let width = max(0, rawWidth - min(2, rawWidth / 2))
                             let cellID = GuideGrid.GridCellID(channelID: channel.id, blockID: block.id)
 
                             Button {
@@ -294,6 +299,8 @@ private struct GuideGridRow: View {
                                     nowMs: nowMs
                                 )
                                 .frame(width: width, height: GuideGrid.rowHeight - 2)
+                                .clipped()
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(SpelunkrPlainFocusButtonStyle())
                             .disabled(!channel.isWatchable)
@@ -320,7 +327,9 @@ private struct GuideGridRow: View {
                 .stroke(isSelectedRow ? Theme.yellow : Theme.gridLine, lineWidth: isSelectedRow ? 3 : 1)
         )
         .task(id: taskKey) {
-            blocks = await store.blocks(for: channel.id, fromMs: windowStartMs, toMs: windowEndMs)
+            let updated = await store.blocks(for: channel.id, fromMs: windowStartMs, toMs: windowEndMs)
+            guard !Task.isCancelled else { return }
+            blocks = updated
             // Focus the first watchable channel's active cell on initial load
             if focusedCell.wrappedValue == nil, isSelectedRow, let first = blocks.first {
                 focusedCell.wrappedValue = GuideGrid.GridCellID(channelID: channel.id, blockID: first.id)

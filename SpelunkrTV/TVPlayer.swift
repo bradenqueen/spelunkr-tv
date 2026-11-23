@@ -52,6 +52,10 @@ final class TVPlayer {
     @ObservationIgnored private var overlayLag: Double = 0.4
     @ObservationIgnored private var overlayCorrectionMs: Double = 0
 
+    @ObservationIgnored private var fullscreen = false
+    @ObservationIgnored private var displayTask: Task<Void, Never>?
+    @ObservationIgnored private var endObservers: [NSObjectProtocol] = []
+
     init() {
         video.automaticallyWaitsToMinimizeStalling = true
         music.volume = 0.8
@@ -61,23 +65,13 @@ final class TVPlayer {
     // MARK: - Control
 
     func tune(_ ch: ChannelInfo) {
-        let changed = channel?.id != ch.id
         channel = ch
-        if changed {
-            onAir = nil
-            phase = .tuning
-            video.pause()
-            video.replaceCurrentItem(with: nil)
-            video.isMuted = false
-            music.pause()
-            boundaryTask?.cancel(); boundaryTask = nil
-            warmTask?.cancel(); warmTask = nil
-            warmLeadTask?.cancel(); warmLeadTask = nil
-            warmer.cancelPending()
-            stopOverlay()
-            stopHum()
-            clearPicture()
-        }
+        onAir = nil
+        phase = .tuning
+        silenceTape(resetDisplay: false)
+        boundaryTask?.cancel()
+        warmTask?.cancel()
+        warmLeadTask?.cancel()
         tuneTask?.cancel()
         tuneTask = Task { [weak self] in await self?.playCurrent() }
         startMonitor()
@@ -90,15 +84,7 @@ final class TVPlayer {
         warmTask?.cancel(); warmTask = nil
         warmLeadTask?.cancel(); warmLeadTask = nil
         warmer.cancelAll()
-        video.pause()
-        video.replaceCurrentItem(with: nil)
-        video.isMuted = false
-        music.pause()
-        music.replaceCurrentItem(with: nil)
-        stopOverlay()
-        stopHum()
-        clearPicture()
-        DisplayMatching.reset()
+        silenceTape()
         channel = nil
         onAir = nil
         phase = .idle
@@ -113,7 +99,7 @@ final class TVPlayer {
         guard !Task.isCancelled, channel?.id == ch.id else { return }
         guard let item = found else {
             silenceTape()
-            stopOverlay()
+            warmer.cancelPending()
             phase = .problem("Nothing is scheduled on this channel right now.")
             scheduleBoundary(atMs: Date.nowMs + 30_000)
             return
@@ -124,6 +110,7 @@ final class TVPlayer {
         if ch.audioOverlay == true { startHum() }
 
         guard item.isTape else {
+            DisplayMatching.reset()
             video.pause()
             video.replaceCurrentItem(with: nil)
             clearPicture()
@@ -170,7 +157,7 @@ final class TVPlayer {
 
         var playerItem = AVPlayerItem(asset: asset)
         var issuedMs = Date.nowMs
-        var earlySeek: Task<Bool, Never>?
+        var earlySeek: AsyncStream<Bool>?
         var ready = false
         let tolerance = CMTime(seconds: 1, preferredTimescale: 600)
         for attempt in 0..<2 {
@@ -188,16 +175,13 @@ final class TVPlayer {
             // doesn't honour a seek this early, it is repeated once the item is ready.
             issuedMs = Date.nowMs
             let target = item.expectedPosition(atMs: issuedMs) + (wasWarm ? warmStartLag : coldStartLag)
-            let seekingItem = playerItem
-            earlySeek = Task {
-                await seekingItem.seek(to: CMTime(seconds: target, preferredTimescale: 600),
-                                       toleranceBefore: tolerance, toleranceAfter: tolerance)
-            }
+            earlySeek = beginSeek(on: playerItem, to: target, tolerance: tolerance)
 
             ready = await waitUntilReady(playerItem, timeout: usedDirect ? 12 : 25)
             guard !Task.isCancelled else { return }
             if ready || !usedDirect { break }
             // The direct storage address didn't work: go back to archive.org/download for this item.
+            playerItem.cancelPendingSeeks()
             warmer.forgetServer(for: url)
             asset = AVURLAsset(url: url)
             usedDirect = false
@@ -209,6 +193,7 @@ final class TVPlayer {
             return
         }
 
+        observeEnd(of: playerItem, scheduled: item)
         videoSize = playerItem.presentationSize
         refreshCorrection()
         matchDisplay(to: playerItem, key: item.key)
@@ -217,8 +202,14 @@ final class TVPlayer {
         if let earlySeek { positioned = await finished(earlySeek, within: 8) }
         guard !Task.isCancelled, video.currentItem === playerItem else { return }
         if !positioned {
-            positioned = await seekToBroadcast(item, tolerance: tolerance)
+            playerItem.cancelPendingSeeks()
+            let recovered = await seekToBroadcast(item, tolerance: tolerance)
             guard !Task.isCancelled, video.currentItem === playerItem else { return }
+            guard recovered else {
+                silenceTape()
+                phase = .problem("This tape couldn't reach its broadcast position. The next show starts at \(formatClock(item.endMs)).")
+                return
+            }
         }
 
         // Start at once: don't wait for the buffer to fill (later stalls still rebuffer normally).
@@ -322,25 +313,45 @@ final class TVPlayer {
         return nil
     }
 
+    func setFullscreen(_ visible: Bool) {
+        fullscreen = visible
+        displayTask?.cancel()
+        if visible, let item = video.currentItem, item.status == .readyToPlay, let key = onAir?.key {
+            matchDisplay(to: item, key: key)
+        } else if !visible {
+            DisplayMatching.reset()
+        }
+    }
+
     /// Asks the TV to match the tape's frame rate and dynamic range (Match Content settings).
     /// Runs alongside playback so it never delays the start, and is dropped if the tape has changed.
     private func matchDisplay(to playerItem: AVPlayerItem, key: String) {
-        guard DisplayMatching.isEnabled else { return }
+        guard fullscreen, DisplayMatching.isEnabled else { return }
+        displayTask?.cancel()
         let asset = playerItem.asset
-        Task { [weak self] in
-            guard let target = await DisplayMatching.target(for: asset) else { return }
-            guard let self, self.onAir?.key == key, self.video.currentItem === playerItem else { return }
-            DisplayMatching.apply(target)
+        displayTask = Task { [weak self] in
+            let target = await DisplayMatching.target(for: asset)
+            guard !Task.isCancelled, let self, self.fullscreen, self.onAir?.key == key,
+                  self.video.currentItem === playerItem else { return }
+            if let target { DisplayMatching.apply(target) } else { DisplayMatching.reset() }
         }
     }
 
     /// Stops whatever tape or card music was on, so a problem screen is never silent-but-wrong
     /// (an earlier tape carrying on under a "can't play" card).
-    private func silenceTape() {
+    private func silenceTape(resetDisplay: Bool = true) {
+        stopObservingEnd()
+        displayTask?.cancel()
+        if resetDisplay { DisplayMatching.reset() }
+        stopOverlay()
+        stopHum()
+        isBuffering = false
+        video.currentItem?.cancelPendingSeeks()
         video.pause()
         video.replaceCurrentItem(with: nil)
         video.isMuted = false
         music.pause()
+        music.replaceCurrentItem(with: nil)
         clearPicture()
     }
 
@@ -367,8 +378,11 @@ final class TVPlayer {
     private func seekToBroadcast(_ item: OnAir, tolerance: CMTime = .zero) async -> Bool {
         let started = Date.nowMs
         let target = item.expectedPosition(atMs: Date.nowMs) + seekLag
-        let done = await video.seek(to: CMTime(seconds: target, preferredTimescale: 600),
-                                    toleranceBefore: tolerance, toleranceAfter: tolerance)
+        guard let playerItem = video.currentItem else { return false }
+        let seek = beginSeek(on: playerItem, to: target, tolerance: tolerance)
+        let done = await finished(seek, within: 8)
+        guard !Task.isCancelled, video.currentItem === playerItem else { return false }
+        if !done { playerItem.cancelPendingSeeks() }
         let took = (Date.nowMs - started) / 1000
         seekLag = min(5, max(0.2, (seekLag + took) / 2))
         lastCorrectionMs = Date.nowMs
@@ -405,10 +419,23 @@ final class TVPlayer {
         }
     }
 
+    private func beginSeek(on playerItem: AVPlayerItem, to seconds: Double, tolerance: CMTime) -> AsyncStream<Bool> {
+        AsyncStream { continuation in
+            playerItem.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
+                            toleranceBefore: tolerance, toleranceAfter: tolerance) { completed in
+                continuation.yield(completed)
+                continuation.finish()
+            }
+        }
+    }
+
     /// The outcome of a seek that is already under way, or false if it hasn't finished within `seconds`.
-    private func finished(_ seek: Task<Bool, Never>, within seconds: Double) async -> Bool {
+    private func finished(_ seek: AsyncStream<Bool>, within seconds: Double) async -> Bool {
         await withTaskGroup(of: Bool.self) { group in
-            group.addTask { await seek.value }
+            group.addTask {
+                for await result in seek { return result }
+                return false
+            }
             group.addTask {
                 try? await Task.sleep(for: .seconds(seconds))
                 return false
@@ -438,8 +465,7 @@ final class TVPlayer {
 
     /// Starts the music for a tape and arranges to switch tracks when the playlist moves on.
     private func startOverlay(_ cue: OverlayCue) {
-        overlayTask?.cancel()
-        overlayBoundaryTask?.cancel()
+        stopOverlay()
         overlayCue = cue
         overlayRecovered = nil
         overlayTask = Task { [weak self] in await self?.playOverlay(cue) }
@@ -451,9 +477,13 @@ final class TVPlayer {
             guard !Task.isCancelled, let self, let ch = self.channel, let engine = self.store?.engine else { return }
             // Ask a moment after the changeover so we get the new track even if we woke early.
             let at = max(Date.nowMs, nextAt) + 20
-            guard let next = await engine.overlay(channel: ch.id, atMs: at),
-                  !Task.isCancelled, self.channel?.id == ch.id, self.onAir?.key == next.key else { return }
-            self.startOverlay(next)
+            let next = await engine.overlay(channel: ch.id, atMs: at)
+            guard !Task.isCancelled, self.channel?.id == ch.id, self.overlayCue == cue else { return }
+            if let next, self.onAir?.key == next.key {
+                self.startOverlay(next)
+            } else {
+                self.stopOverlay()
+            }
         }
     }
 
@@ -559,6 +589,35 @@ final class TVPlayer {
         }
     }
 
+    private func observeEnd(of playerItem: AVPlayerItem, scheduled item: OnAir) {
+        stopObservingEnd()
+        let ended = AVPlayerItem.didPlayToEndTimeNotification
+        for name in [ended, AVPlayerItem.failedToPlayToEndTimeNotification] {
+            let observer = NotificationCenter.default.addObserver(
+                forName: name, object: playerItem, queue: .main
+            ) { [weak self, weak playerItem] _ in
+                Task { @MainActor in
+                    guard let self, let playerItem, self.video.currentItem === playerItem,
+                          let channel = self.channel else { return }
+                    if Date.nowMs >= item.endMs {
+                        self.tune(channel)
+                    } else {
+                        self.tuneTask?.cancel()
+                        self.silenceTape()
+                        let reason = name == ended ? "This tape ended." : "This tape stopped playing."
+                        self.phase = .problem("\(reason) The next show starts at \(formatClock(item.endMs)).")
+                    }
+                }
+            }
+            endObservers.append(observer)
+        }
+    }
+
+    private func stopObservingEnd() {
+        for observer in endObservers { NotificationCenter.default.removeObserver(observer) }
+        endObservers.removeAll()
+    }
+
     /// Watches for buffering and quietly re-syncs if playback drifts from the broadcast.
     private func startMonitor() {
         guard monitorTask == nil else { return }
@@ -582,6 +641,7 @@ final class TVPlayer {
             return
         }
         if current.status == .failed {
+            silenceTape()
             phase = .problem("This tape stopped playing. The next show starts at \(formatClock(item.endMs)).")
             return
         }

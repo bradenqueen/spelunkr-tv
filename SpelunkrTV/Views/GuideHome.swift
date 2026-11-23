@@ -15,7 +15,7 @@ struct GuideHome: View {
     @State private var previewDebounceTask: Task<Void, Never>?
 
     private var activeChannel: ChannelInfo? {
-        selectedChannel ?? store.watchableChannels.first ?? store.channels.first
+        store.channels.first { $0.id == selectedChannel?.id } ?? store.watchableChannels.first ?? store.channels.first
     }
 
     var body: some View {
@@ -45,7 +45,7 @@ struct GuideHome: View {
                 selectedChannel: $selectedChannel,
                 inspectedBlock: $inspectedBlock,
                 windowStartMs: $windowStartMs,
-                onWatch: onWatch
+                onWatch: watch
             )
             .frame(maxHeight: .infinity)
         }
@@ -66,15 +66,16 @@ struct GuideHome: View {
                 schedulePreviewTune(for: ch, immediate: false)
             }
         }
-        .task(id: activeChannel?.id) {
+        .onDisappear { previewDebounceTask?.cancel() }
+        .task(id: activeChannel.map(DetailsRequest.init)) {
             if let ch = activeChannel {
                 await store.ensureDetails(for: ch)
             }
         }
         .fullScreenCover(item: $scheduleSheetChannel) { channel in
-            ChannelScheduleSheet(channel: channel) {
+            ChannelScheduleSheet(channel: store.channels.first { $0.id == channel.id } ?? channel) {
                 scheduleSheetChannel = nil
-                onWatch(channel)
+                watch(channel)
             } onClose: {
                 scheduleSheetChannel = nil
             }
@@ -203,29 +204,25 @@ struct GuideHome: View {
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
                     let nowMs = Date.nowMs
                     let liveItem = (store.tv.channel?.id == ch.id) ? store.tv.onAir : nil
-                    let currentEntry = entries.first { $0.startMs <= nowMs && nowMs < $0.endMs } ?? entries.first
+                    let currentEntry = entries.first { $0.startMs <= nowMs && nowMs < $0.endMs }
                     let upcoming = entries.filter { $0.startMs > nowMs }.prefix(2)
-
-                    let displayTitle: String = {
-                        if let inspected = inspectedBlock {
-                            return inspected.isMarathon ? inspected.marathonHeadline(channelName: ch.name) : inspected.title
+                    let program: (title: String, year: String?, version: Int?, index: Int?, start: Double, end: Double) = {
+                        if let block = inspectedBlock {
+                            return (block.isMarathon ? block.marathonHeadline(channelName: ch.name) : block.title,
+                                       block.year, block.version, block.videoIndex, block.startMs, block.endMs)
+                        } else if let liveItem, liveItem.type == "video" || currentEntry == nil {
+                            return (liveItem.displayTitle, liveItem.year, liveItem.version, liveItem.videoIndex,
+                                       liveItem.startMs, liveItem.endMs)
+                        } else if let currentEntry {
+                            return (currentEntry.title, currentEntry.year, currentEntry.version, currentEntry.videoIndex,
+                                       currentEntry.startMs, currentEntry.endMs)
+                        } else {
+                            return ("Station break", nil, nil, nil, nowMs, nowMs)
                         }
-                        if let liveItem, liveItem.type == "video" { return liveItem.displayTitle }
-                        return currentEntry?.title ?? liveItem?.displayTitle ?? "Station break"
                     }()
-
-                    let displayYear: String? = {
-                        if let inspected = inspectedBlock { return inspected.year }
-                        if let liveItem, liveItem.type == "video" { return liveItem.year }
-                        return currentEntry?.year
-                    }()
-
-                    let detailVersion: Int? = inspectedBlock?.version ?? liveItem?.version ?? currentEntry?.version
-                    let detailIndex: Int? = inspectedBlock?.videoIndex ?? liveItem?.videoIndex ?? currentEntry?.videoIndex
-                    let blurb = store.detail(channelID: ch.id, version: detailVersion, videoIndex: detailIndex)?.description
-
-                    let startMs = inspectedBlock?.startMs ?? liveItem?.startMs ?? currentEntry?.startMs ?? nowMs
-                    let endMs = inspectedBlock?.endMs ?? liveItem?.endMs ?? currentEntry?.endMs ?? nowMs
+                    let blurb = store.detail(channelID: ch.id, version: program.version, videoIndex: program.index)?.description
+                    let startMs = program.start
+                    let endMs = program.end
                     let totalS = max(1, (endMs - startMs) / 1000)
                     let elapsedS = max(0, min(totalS, (nowMs - startMs) / 1000))
                     let remainingS = max(0, (endMs - nowMs) / 1000)
@@ -276,13 +273,13 @@ struct GuideHome: View {
                                 .foregroundStyle(Theme.yellow)
 
                             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                Text(displayTitle)
+                                Text(program.title)
                                     .font(Theme.heading(34))
                                     .foregroundStyle(.white)
                                     .lineLimit(1)
                                     .wsShadow()
 
-                                if let displayYear, !displayYear.isEmpty {
+                                if let displayYear = program.year, !displayYear.isEmpty {
                                     Text(displayYear)
                                         .font(Theme.label(22))
                                         .foregroundStyle(Theme.cyan)
@@ -336,7 +333,7 @@ struct GuideHome: View {
 
                             HStack(spacing: 14) {
                                 Button {
-                                    onWatch(ch)
+                                    watch(ch)
                                 } label: {
                                     Text("WATCH")
                                         .font(Theme.button(22))
@@ -381,6 +378,12 @@ struct GuideHome: View {
 
     // MARK: - Preview Tuning & Channel Stepping
 
+    private func watch(_ channel: ChannelInfo) {
+        guard channel.isWatchable else { return }
+        previewDebounceTask?.cancel()
+        onWatch(channel)
+    }
+
     private func schedulePreviewTune(for channel: ChannelInfo, immediate: Bool) {
         previewDebounceTask?.cancel()
         guard channel.isWatchable else { return }
@@ -409,6 +412,16 @@ struct GuideHome: View {
 }
 
 // MARK: - Full Channel Schedule Sheet (VIEW CHANNEL)
+
+private struct DetailsRequest: Equatable {
+    let id: String
+    let versions: [VersionPointer]
+
+    init(_ channel: ChannelInfo) {
+        id = channel.id
+        versions = channel.versions
+    }
+}
 
 private struct ChannelScheduleSheet: View {
     @Environment(BroadcastStore.self) private var store
@@ -458,6 +471,7 @@ private struct ChannelScheduleSheet: View {
                     horizontalPadding: 24,
                     verticalPadding: 12
                 ))
+                .disabled(!channel.isWatchable)
             }
 
             ScrollView {
@@ -510,7 +524,7 @@ private struct ChannelScheduleSheet: View {
         .padding(.vertical, 60)
         .background(Theme.screenBackground.ignoresSafeArea())
         .onExitCommand { onClose() }
-        .task {
+        .task(id: DetailsRequest(channel)) {
             await store.ensureDetails(for: channel)
             let now = Date.nowMs
             programs = await store.programs(for: channel.id, fromMs: now, toMs: now + 24 * 3600 * 1000)
