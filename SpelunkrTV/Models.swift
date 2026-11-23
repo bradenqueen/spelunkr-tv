@@ -10,6 +10,11 @@ struct Lineup: Decodable {
     let channels: [ChannelInfo]
 }
 
+struct Logomark: Decodable, Hashable {
+    let type: String?
+    let rows: [String]
+}
+
 struct ChannelInfo: Decodable, Identifiable, Hashable {
     let id: String
     let name: String
@@ -17,6 +22,9 @@ struct ChannelInfo: Decodable, Identifiable, Hashable {
     let color: String?
     let description: String?
     let family: String?
+    let logomark: Logomark?
+    let logomarkSaturation: Double?
+    let logomarkLightness: Double?
     let dial: Int?
     let comingSoon: Bool?
     let debugOnly: Bool?
@@ -46,7 +54,61 @@ struct ManifestHead: Decodable {
     let platform: String?
 }
 
+// MARK: - details/<channel>/vNN.json
+
+struct DetailsFile: Decodable {
+    let channel: String?
+    let version: Int?
+    let items: [ShowDetail?]
+}
+
+struct ShowDetail: Decodable, Equatable {
+    let description: String?
+    let director: String?
+    let stars: [String]?
+    let imdbId: String?
+    let season: Int?
+    let episode: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case description, director, stars, imdbId, season, episode
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        description = try? c.decodeIfPresent(String.self, forKey: .description)
+        director = try? c.decodeIfPresent(String.self, forKey: .director)
+        imdbId = try? c.decodeIfPresent(String.self, forKey: .imdbId)
+        if let arr = try? c.decodeIfPresent([String].self, forKey: .stars) {
+            stars = arr
+        } else if let str = try? c.decodeIfPresent(String.self, forKey: .stars), !str.isEmpty {
+            stars = str.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        } else {
+            stars = nil
+        }
+        if let n = try? c.decodeIfPresent(Int.self, forKey: .season) {
+            season = n
+        } else if let s = try? c.decodeIfPresent(String.self, forKey: .season) {
+            season = Int(s)
+        } else {
+            season = nil
+        }
+        if let n = try? c.decodeIfPresent(Int.self, forKey: .episode) {
+            episode = n
+        } else if let s = try? c.decodeIfPresent(String.self, forKey: .episode) {
+            episode = Int(s)
+        } else {
+            episode = nil
+        }
+    }
+}
+
 // MARK: - What the schedule engine returns
+
+struct PresenceConfig: Decodable, Equatable {
+    let url: String?
+    let key: String?
+}
 
 struct OnAir: Decodable, Equatable {
     struct NextShow: Decodable, Equatable {
@@ -77,10 +139,11 @@ struct OnAir: Decodable, Equatable {
     let file: String?
     let title: String?
     let year: String?
+    let videoIndex: Int?
     let gainDb: Double?
     /// Level (0.05 to 0.3) for a tape's own sound when music is laid over it; nil on other channels.
     let ambient: Double?
-    /// Size in bytes of the tape's moov atom, when the schedule engine reports it (not yet: stays nil).
+    /// Size in bytes of the tape's moov atom, when the schedule engine reports it.
     let moov: Int?
 
     // bump-break and up-next
@@ -156,6 +219,57 @@ struct GuideEntry: Decodable, Hashable {
     let year: String?
     let startMs: Double
     let endMs: Double
+    let videoIndex: Int?
+    let version: Int?
+}
+
+struct GuideProgram: Decodable, Identifiable, Hashable {
+    let title: String
+    let year: String?
+    let startMs: Double
+    let endMs: Double
+    let durationS: Double
+    let videoIndex: Int?
+    let version: Int?
+
+    var id: String { "\(Int64(startMs))-\(title)" }
+
+    func isAiring(atMs nowMs: Double) -> Bool {
+        startMs <= nowMs && nowMs < endMs
+    }
+}
+
+struct GuideBlock: Decodable, Identifiable, Hashable {
+    let title: String
+    let year: String?
+    let startMs: Double
+    let endMs: Double
+    let durationS: Double
+    let videoIndex: Int?
+    let version: Int?
+    let isMarathon: Bool
+    let series: String?
+    let showCount: Int
+    let shows: [GuideProgram]
+
+    var id: String { "\(isMarathon ? "m" : "t")-\(Int64(startMs))-\(Int64(endMs))" }
+
+    func isAiring(atMs nowMs: Double) -> Bool {
+        startMs <= nowMs && nowMs < endMs
+    }
+
+    func activeShow(atMs nowMs: Double) -> GuideProgram? {
+        guard isMarathon else { return nil }
+        return shows.first { $0.isAiring(atMs: nowMs) }
+    }
+
+    func marathonHeadline(channelName: String) -> String {
+        series ?? "\(channelName) Marathon"
+    }
+
+    var spanText: String {
+        formatMarathonSpan(durationS)
+    }
 }
 
 // MARK: - Helpers
@@ -178,9 +292,19 @@ extension Color {
 }
 
 func formatDuration(_ seconds: Double) -> String {
-    let s = Int(seconds.rounded())
+    let s = max(0, Int(seconds.rounded()))
     let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
     return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
+}
+
+func formatMarathonSpan(_ seconds: Double) -> String {
+    let s = max(0, Int(seconds.rounded()))
+    let h = s / 3600
+    let m = Int((Double(s % 3600) / 60.0).rounded())
+    if h > 0 {
+        return String(format: "%dh %02dm", h, m)
+    }
+    return "\(m)m"
 }
 
 func formatClock(_ ms: Double) -> String {

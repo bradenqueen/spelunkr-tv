@@ -47,6 +47,12 @@ actor ScheduleEngine {
         return result
     }
 
+    func presenceConfig() -> PresenceConfig? {
+        guard let value = (try? call("spkPresenceConfig", [])) ?? nil,
+              value.isString, let json = value.toString() else { return nil }
+        return try? JSONDecoder().decode(PresenceConfig.self, from: Data(json.utf8))
+    }
+
     func hasVersion(channel: String, v: Int) -> Bool {
         guard let value = (try? call("spkHasVersion", [channel, v])) ?? nil else { return false }
         return value.toBool()
@@ -74,5 +80,17 @@ actor ScheduleEngine {
         guard let value = (try? call("spkUpcoming", [channel, atMs, count])) ?? nil,
               value.isString, let json = value.toString() else { return [] }
         return (try? JSONDecoder().decode([GuideEntry].self, from: Data(json.utf8))) ?? []
+    }
+
+    func range(channel: String, fromMs: Double, toMs: Double) -> [GuideProgram] {
+        guard let value = (try? call("spkRange", [channel, fromMs, toMs])) ?? nil,
+              value.isString, let json = value.toString() else { return [] }
+        return (try? JSONDecoder().decode([GuideProgram].self, from: Data(json.utf8))) ?? []
+    }
+
+    func blocks(channel: String, fromMs: Double, toMs: Double) -> [GuideBlock] {
+        guard let value = (try? call("spkBlocks", [channel, fromMs, toMs])) ?? nil,
+              value.isString, let json = value.toString() else { return [] }
+        return (try? JSONDecoder().decode([GuideBlock].self, from: Data(json.utf8))) ?? []
     }
 }
