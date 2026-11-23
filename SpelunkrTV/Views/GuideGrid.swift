@@ -10,15 +10,15 @@ enum GuideFocus: Hashable {
     case cell(GuideGrid.GridCellID)
 }
 
-/// Three-hour cable time grid.
-/// All 37 rows share the same 3-hour window (`windowStartMs`), computed lazily per visible row.
+/// Cable time grid.
+/// All rows share the same time window (`windowStartMs`), computed lazily per visible row.
 ///
 /// Focus is driven by identity, not geometry. The system focus engine may land on whatever cell is
 /// nearest, so every landing is checked against the "focus time" anchor and corrected to the cell
 /// that contains it (see `handleCellFocus`).
 struct GuideGrid: View {
     @Environment(\.appTheme) private var theme
-    static let windowDurationMs: Double = 3 * 3600 * 1000
+    private var windowDurationMs: Double { (theme.usesCableLayout ? 2 : 3) * 3600 * 1000 }
     static let stepMs: Double = 30 * 60 * 1000
     static let channelColumnWidth: CGFloat = 430
     /// Row height 80 + 2 spacing: five rows (412 pt with padding) fit the 418 pt scroll area.
@@ -89,7 +89,7 @@ struct GuideGrid: View {
     }
 
     private func grid(startingAt windowStartMs: Double, nowMs: Double) -> some View {
-        let windowEndMs = windowStartMs + Self.windowDurationMs
+        let windowEndMs = windowStartMs + windowDurationMs
 
         return VStack(spacing: 0) {
             timeHeader(windowStartMs: windowStartMs, windowEndMs: windowEndMs, nowMs: nowMs)
@@ -228,8 +228,8 @@ struct GuideGrid: View {
         var target = windowStartMs
         if block.isAiring(atMs: nowMs) {
             target = floorMs
-        } else if block.startMs > windowStartMs + Self.windowDurationMs - Self.stepMs {
-            let edge = windowStartMs + Self.windowDurationMs - Self.stepMs
+        } else if block.startMs > windowStartMs + windowDurationMs - Self.stepMs {
+            let edge = windowStartMs + windowDurationMs - Self.stepMs
             target = windowStartMs + ceil((block.startMs - edge) / Self.stepMs) * Self.stepMs
         }
         if target != windowStartMs, target != self.windowStartMs {
@@ -248,7 +248,7 @@ struct GuideGrid: View {
             // move focus there, so one press is one move.
             guard visible.last?.id == block.id else { return }
             let next = block.endMs
-            let needed = ceil((next - (Self.windowDurationMs - Self.stepMs) - windowStartMs) / Self.stepMs)
+            let needed = ceil((next - (windowDurationMs - Self.stepMs) - windowStartMs) / Self.stepMs)
             let steps = max(1, needed)
             setWindowStart(windowStartMs + steps * Self.stepMs)
             focusIntent = FocusIntent(channelID: channel.id, atMs: next)
@@ -320,12 +320,14 @@ struct GuideGrid: View {
     // MARK: - Time Header
 
     private func timeHeader(windowStartMs: Double, windowEndMs: Double, nowMs: Double) -> some View {
-        let hours = hourlyTicks(from: windowStartMs, to: windowEndMs)
+        let hours = theme.usesCableLayout
+            ? (0..<4).map { windowStartMs + Double($0) * Self.stepMs }
+            : hourlyTicks(from: windowStartMs, to: windowEndMs)
         let total = store.presence.totalViewers
 
         return HStack(spacing: 0) {
             HStack(spacing: 12) {
-                Text("CHANNEL")
+                Text(theme.usesCableLayout ? "ON NOW" : "CHANNEL")
                     .font(theme.label(24))
                     .foregroundStyle(theme.accent)
                     .wsShadow()
@@ -347,7 +349,7 @@ struct GuideGrid: View {
                     theme.gridHeaderFill
 
                     ForEach(hours, id: \.self) { tickMs in
-                        let pct = (tickMs - windowStartMs) / Self.windowDurationMs
+                        let pct = (tickMs - windowStartMs) / windowDurationMs
                         let x = max(10, min(geo.size.width - 190, geo.size.width * pct))
                         Text(Theme.formatTime12(tickMs))
                             .font(theme.time(27))
@@ -360,7 +362,7 @@ struct GuideGrid: View {
 
                     // "Now" marker on the bottom edge of the time header.
                     if nowMs >= windowStartMs && nowMs <= windowEndMs {
-                        let nowX = geo.size.width * ((nowMs - windowStartMs) / Self.windowDurationMs)
+                        let nowX = geo.size.width * ((nowMs - windowStartMs) / windowDurationMs)
                         Rectangle()
                             .fill(theme.liveIndicator)
                             .frame(width: 4, height: 12)
@@ -459,8 +461,8 @@ private struct GuideGridRow: View {
             // Pinned channel column
             HStack(spacing: 10) {
                 Text(channel.dialText)
-                    .font(theme.dialNumber(52))
-                    .foregroundStyle(theme.accent)
+                    .font(theme.dialNumber(theme.usesCableLayout ? 36 : 52))
+                    .foregroundStyle(theme.usesCableLayout ? theme.primaryText : theme.accent)
                     .wsShadow()
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
@@ -475,9 +477,9 @@ private struct GuideGridRow: View {
                 }
 
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(channel.name)
+                    Text(theme.usesCableLayout ? channel.name.uppercased() : channel.name)
                         .font(theme.channelName(24))
-                        .foregroundStyle(theme.primaryText)
+                        .foregroundStyle(theme.usesCableLayout ? (Color(hex: channel.color) ?? theme.secondaryAccent) : theme.primaryText)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                         .wsShadow()
@@ -486,7 +488,7 @@ private struct GuideGridRow: View {
                             .font(theme.label(23))
                             .foregroundStyle(theme.accent)
                             .lineLimit(1)
-                    } else if viewers > 0 {
+                    } else if viewers > 0, !theme.usesCableLayout {
                         ViewerBadge(count: viewers, fontSize: 23, color: isSelectedRow ? theme.secondaryAccent : theme.mutedText)
                     }
                 }
@@ -571,7 +573,7 @@ private struct GuideGridRow: View {
         .frame(height: GuideGrid.rowHeight)
         .clipped()
         .overlay(
-            Rectangle()
+            RoundedRectangle(cornerRadius: theme.usesCableLayout ? theme.cellCornerRadius : 0)
                 .strokeBorder(isSelectedRow ? theme.selectedBorder : theme.gridLine, lineWidth: isSelectedRow ? 3 : 1)
         )
         .task(id: taskKey) {
@@ -649,11 +651,13 @@ private struct GuideProgramCell: View {
                 .truncationMode(.tail)
                 .wsShadow()
 
-            Text(subtitle)
-                .font(theme.label(23))
-                .foregroundStyle(isCellFocused ? theme.softText : (block.isMarathon ? theme.secondaryAccent : theme.mutedText))
-                .lineLimit(1)
-                .truncationMode(.tail)
+            if !theme.usesCableLayout {
+                Text(subtitle)
+                    .font(theme.label(23))
+                    .foregroundStyle(isCellFocused ? theme.softText : (block.isMarathon ? theme.secondaryAccent : theme.mutedText))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 3)
@@ -679,7 +683,7 @@ private struct GuideProgramCell: View {
             return AnyShapeStyle(theme.focusedFill)
         }
         if isCurrent {
-            return AnyShapeStyle(Color.white.opacity(isRowSelected ? 0.14 : 0.08))
+            return AnyShapeStyle(theme.usesCableLayout ? theme.alternateRowFill : Color.white.opacity(isRowSelected ? 0.14 : 0.08))
         }
         return AnyShapeStyle(theme.raisedSurface.opacity(0.55))
     }

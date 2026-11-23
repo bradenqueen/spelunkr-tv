@@ -57,16 +57,22 @@ struct PlayerScreen: View {
                     videoIndex: tv.onAir?.videoIndex
                 )?.description
 
-                InfoBanner(
-                    channel: channel,
-                    item: tv.onAir,
-                    blurb: blurb,
-                    viewers: store.presence.count(for: channel.id)
-                )
-                .transition(.move(edge: .top).combined(with: .opacity))
+                if theme.usesCableLayout {
+                    CablePlayerOverlay(channel: channel, item: tv.onAir)
+                        .transition(.opacity)
+                } else {
+                    InfoBanner(
+                        channel: channel,
+                        item: tv.onAir,
+                        blurb: blurb,
+                        viewers: store.presence.count(for: channel.id)
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
         }
         .ignoresSafeArea()
+        .cableScanlines()
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
@@ -131,6 +137,70 @@ struct PlayerScreen: View {
                 withAnimation(.easeIn(duration: 0.4)) { showInfo = false }
             }
         }
+    }
+}
+
+private struct CablePlayerOverlay: View {
+    @Environment(\.appTheme) private var theme
+    let channel: ChannelInfo
+    let item: OnAir?
+
+    var body: some View {
+        VStack {
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(channel.dialText).font(theme.dialNumber(82))
+                Text(channel.name.uppercased()).font(theme.channelName(30)).lineLimit(1)
+            }
+            .foregroundStyle(theme.accent)
+            .padding(22)
+            .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: theme.cellCornerRadius))
+            .frame(maxWidth: .infinity, alignment: .trailing)
+
+            Spacer()
+
+            HStack(spacing: 26) {
+                if let rows = channel.logomark?.rows, !rows.isEmpty {
+                    LogomarkView(rows: rows, primaryColor: channel.color, size: 86)
+                }
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(channel.dialText).font(theme.dialNumber(50))
+                    Text(channel.name.uppercased()).font(theme.label(26)).lineLimit(1)
+                }
+                .foregroundStyle(theme.accent)
+                .frame(width: 265, alignment: .trailing)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(item?.displayTitle ?? "Tuning…")
+                        .font(theme.heading(38)).foregroundStyle(theme.primaryText).lineLimit(1)
+                    if let item {
+                        if let year = item.year, !year.isEmpty {
+                            Text(year).font(theme.label(24)).foregroundStyle(theme.mutedText)
+                        }
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            let now = context.date.timeIntervalSince1970 * 1000
+                            let duration = max(1, item.endMs - item.startMs)
+                            let progress = min(1, max(0, (now - item.startMs) / duration))
+                            ProgressView(value: progress)
+                                .tint(theme.accent)
+                                .accessibilityLabel("Program progress")
+                            Text("\(Theme.formatTime12(item.startMs)) – \(Theme.formatTime12(item.endMs)) · \(formatDuration(item.secondsLeft(atMs: now))) left")
+                                .font(theme.time(24)).foregroundStyle(theme.mutedText).lineLimit(1)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(26)
+            .frame(maxWidth: 1440)
+            .background(theme.baseSurface.opacity(0.96), in: RoundedRectangle(cornerRadius: theme.panelCornerRadius))
+            .overlay {
+                RoundedRectangle(cornerRadius: theme.panelCornerRadius)
+                    .strokeBorder(theme.panelBorder, lineWidth: 2)
+            }
+        }
+        .padding(.horizontal, 96)
+        .padding(.vertical, 64)
+        .allowsHitTesting(false)
     }
 }
 

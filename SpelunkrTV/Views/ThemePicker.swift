@@ -16,12 +16,13 @@ struct ThemePicker: View {
 
     @Environment(\.appTheme) private var theme
     @Environment(\.themeSelection) private var themeSelection
+    @AppStorage("cableScanlines") private var cableScanlinesEnabled = true
     @FocusState private var focusedThemeID: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 36) {
             HStack {
-                Text("Theme Mode")
+                Text(theme.usesCableLayout ? "SETTINGS" : "Theme Mode")
                     .font(theme.heading(62))
                     .foregroundStyle(theme.primaryText)
                     .accessibilityAddTraits(.isHeader)
@@ -30,22 +31,63 @@ struct ThemePicker: View {
             }
             .padding(.horizontal, 12)
 
-            ScrollView {
-                VStack(spacing: 18) {
-                    ForEach(Theme.catalog) { option in
-                        themeButton(for: option)
+            HStack(alignment: .top, spacing: 72) {
+                ScrollView {
+                    VStack(spacing: 18) {
+                        if theme.usesCableLayout {
+                            scanlinesButton
+                        }
+                        ForEach(Theme.catalog) { option in
+                            themeButton(for: option)
+                        }
                     }
+                    .padding(12)
                 }
-                .padding(12)
+                if theme.usesCableLayout {
+                    aboutPanel
+                        .frame(width: 500, alignment: .leading)
+                }
             }
         }
-        .frame(maxWidth: 1040)
+        .frame(maxWidth: theme.usesCableLayout ? 1700 : 1040)
         .padding(.horizontal, 80)
         .padding(.vertical, 60)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(theme.screenBackground.ignoresSafeArea())
+        .cableScanlines()
         .defaultFocus($focusedThemeID, theme.id)
         .onExitCommand(perform: onClose)
+    }
+
+    private var scanlinesButton: some View {
+        Button {
+            cableScanlinesEnabled.toggle()
+        } label: {
+            HStack {
+                Text("CRT scanlines").foregroundStyle(theme.primaryText)
+                Spacer()
+                Text(cableScanlinesEnabled ? "ON" : "OFF").foregroundStyle(theme.accent)
+            }
+            .font(theme.label(32))
+        }
+        .buttonStyle(SpelunkrActionButtonStyle(background: AnyShapeStyle(theme.panelFill)))
+        .accessibilityLabel("CRT scanlines")
+        .accessibilityValue(cableScanlinesEnabled ? Text("On") : Text("Off"))
+    }
+
+    private var aboutPanel: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Text("ABOUT")
+                .font(theme.heading(34))
+                .foregroundStyle(theme.accent)
+                .accessibilityAddTraits(.isHeader)
+            Text("An unofficial Apple TV client for spelunkr.tv.")
+            Text("Channels follow a shared broadcast schedule. Programs stream from the Internet Archive.")
+            Text("Music credits appear during station breaks.")
+        }
+        .font(theme.body(29))
+        .foregroundStyle(theme.softText)
+        .padding(.top, 14)
     }
 
     private func themeButton(for option: Theme) -> some View {

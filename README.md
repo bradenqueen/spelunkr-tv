@@ -13,7 +13,7 @@
 ## Features
 
 - A TV-sized channel guide with a live preview, a scrollable program grid, and details for upcoming shows
-- Modern, Neon, and Classic themes, with your choice saved on the Apple TV
+- Modern, Neon, Cable Guide, and Classic themes, with your choice saved on the Apple TV
 - Live viewer counts for each channel and across the guide, shared with the website
 - Same schedule as the website: your TV and the browser show the same tape at the same moment
 - Live-TV channel surfing with the Siri Remote (up and down to change channels)
@@ -104,7 +104,7 @@ If the app starts but says "The schedule engine is missing from the app", step 2
 - Select a live program to watch it, or select an upcoming program to see its details
 - Press Play/Pause to jump to what's on now for the highlighted channel
 - Press Up from the first grid row to reach WATCH. Press Down from the top controls to return to the live program
-- From WATCH, move right to **Theme Mode** to choose Modern (the default), Neon (graphite and ’90s accents), or Classic (the WeatherStar look)
+- From WATCH, move right to **Theme Mode** to choose a theme. **Cable Guide** uses a two-hour grid and a classic tuning display. In that theme, open **Settings** to switch themes or toggle CRT scanlines.
 - From View Channel or Theme Mode, use **Back to Guide** or Menu/Back to return to the control you came from
 - Menu/Back from the main guide: leave the app
 

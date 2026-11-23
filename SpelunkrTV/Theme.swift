@@ -253,8 +253,69 @@ struct Theme: Identifiable {
         )
     }()
 
+    static let cable: Theme = {
+        let brandSurface = rgb(0x151746)
+        let baseSurface = rgb(0x080A20)
+        let accent = rgb(0xFFDA59)
+        let focusFill = vertical([rgb(0x464030), rgb(0x343044), rgb(0x222651)])
+
+        return Theme(
+            id: "cable",
+            name: "Cable Guide",
+            summary: "Midnight blue, a gold tuning indicator, and retro cable lettering.",
+            brandSurface: brandSurface,
+            gridHeaderFill: rgb(0x131635),
+            baseSurface: baseSurface,
+            alternateRowFill: rgb(0x22295F),
+            raisedSurface: rgb(0x1C2152),
+            gridLine: rgb(0x10132B),
+            accent: accent,
+            secondaryAccent: rgb(0x9AC9FF),
+            primaryText: .white,
+            softText: rgb(0xE6E8FF),
+            mutedText: rgb(0xB2B8D8),
+            controlBorder: rgb(0x626C9C),
+            panelBorder: rgb(0x414C80),
+            panelInnerBorder: rgb(0x232A53),
+            liveBadgeAccent: rgb(0xFF3B4E),
+            liveIndicator: accent,
+            liveProgramMarker: nil,
+            warningAccent: .orange,
+            focusBorder: accent,
+            selectedBorder: accent,
+            screenBackground: vertical([brandSurface, rgb(0x101234), baseSurface]),
+            panelFill: vertical([rgb(0x252B68), rgb(0x171C48)]),
+            primaryActionFill: vertical([rgb(0x4F4225), rgb(0x403721), rgb(0x292640)]),
+            focusedFill: focusFill,
+            secondaryActionFill: vertical([rgb(0x30376B), rgb(0x272D61), rgb(0x1C2252)]),
+            progressFill: vertical([accent, rgb(0xD9B400)]),
+            selectedRowFill: AnyShapeStyle(focusFill),
+            panelCornerRadius: 8,
+            controlCornerRadius: 6,
+            cellCornerRadius: 5,
+            panelBorderWidth: 1,
+            panelInnerBorderWidth: 0,
+            playerBorderWidth: 1,
+            playerBannerCornerRadius: 0,
+            showsAnimatedStatic: true,
+            statusCaptionFont: .system(size: 40, weight: .heavy, design: .monospaced),
+            statusCaptionBackground: .black.opacity(0.7),
+            statusCaptionCornerRadius: 10,
+            bufferingBackground: .black.opacity(0.7),
+            bufferingCornerRadius: 8,
+            buttonFocusFill: nil,
+            buttonFocusBrightness: 0.12,
+            buttonFocusScale: 1.015,
+            buttonBorderWidth: 2,
+            showsTextShadow: false,
+            typography: .weatherStar
+        )
+    }()
+
+    var usesCableLayout: Bool { id == Self.cable.id }
+
     /// The order here is the order in the Theme Mode picker. Keep IDs stable for saved choices.
-    static let catalog: [Theme] = [.modern, .neon, .classic]
+    static let catalog: [Theme] = [.modern, .neon, .cable, .classic]
 
     static func resolve(_ id: String) -> Theme {
         catalog.first { $0.id == id } ?? modern
@@ -391,6 +452,35 @@ struct Theme: Identifiable {
 
 private enum AppThemeKey: EnvironmentKey {
     static let defaultValue = Theme.modern
+}
+
+private struct CableScanlines: ViewModifier {
+    @Environment(\.appTheme) private var theme
+    @AppStorage("cableScanlines") private var enabled = true
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            if theme.usesCableLayout, enabled {
+                Canvas { context, size in
+                    var lines = Path()
+                    for y in stride(from: CGFloat(1), to: size.height, by: 4) {
+                        lines.move(to: CGPoint(x: 0, y: y))
+                        lines.addLine(to: CGPoint(x: size.width, y: y))
+                    }
+                    context.stroke(lines, with: .color(.black.opacity(0.22)), lineWidth: 1)
+                }
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+        }
+    }
+}
+
+extension View {
+    func cableScanlines() -> some View {
+        modifier(CableScanlines())
+    }
 }
 
 extension EnvironmentValues {

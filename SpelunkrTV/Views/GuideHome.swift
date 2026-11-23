@@ -54,12 +54,15 @@ struct GuideHome: View {
 
             // Top section: Live preview (left) + Info panel (right), aligned flush at 480pt tall
             // A focus section, so Down from any control here reaches the grid and Up from the grid reaches WATCH.
-            HStack(alignment: .top, spacing: 20) {
-                previewPane
-                    .frame(width: 640, height: 480)
-
-                infoPanel
-                    .frame(maxWidth: .infinity, minHeight: 480, maxHeight: 480)
+            Group {
+                if theme.usesCableLayout {
+                    cableGuideHeader
+                } else {
+                    HStack(alignment: .top, spacing: 20) {
+                        previewPane.frame(width: 640, height: 480)
+                        infoPanel.frame(maxWidth: .infinity, minHeight: 480, maxHeight: 480)
+                    }
+                }
             }
             .focusSection()
 
@@ -80,6 +83,7 @@ struct GuideHome: View {
         .padding(.horizontal, 80)
         .padding(.vertical, 60)
         .background(theme.screenBackground.ignoresSafeArea())
+        .cableScanlines()
         .onPlayPauseCommand {
             if presentation == nil, focusAfterDismissal == nil { focusLiveProgram() }
         }
@@ -133,44 +137,17 @@ struct GuideHome: View {
 
     private var previewPane: some View {
         let ch = activeChannel
-        let tv = store.tv
-        // The preview is only valid for the highlighted channel; between a row change and the retune
-        // it must not show the previous channel's last frame.
-        let isTunedToChannel = ch != nil && tv.channel?.id == ch?.id
-
         // Keep the same video and control area across themes.
         let borderWidth = theme.panelBorderWidth + theme.panelInnerBorderWidth
         return VStack(spacing: 0) {
-            ZStack {
-                Color.black
-
-                PlayerLayerView(player: tv.video, correction: tv.correction, videoSize: tv.videoSize)
-                    .opacity(isTunedToChannel && tv.phase == .playing ? 1 : 0)
-
-                if !isTunedToChannel {
-                    previewTuningOverlay(channel: ch, caption: ch?.isWatchable == false ? "COMING SOON" : "TUNING…")
-                } else {
-                    switch tv.phase {
-                    case .idle, .tuning:
-                        previewTuningOverlay(channel: ch, caption: "TUNING…")
-                    case .card:
-                        if let item = tv.onAir, let playingCh = tv.channel {
-                            BumpCardView(item: item, channel: playingCh)
-                        }
-                    case .problem(let message):
-                        previewTuningOverlay(channel: ch, caption: message)
-                    case .playing:
-                        EmptyView()
-                    }
-                }
-            }
-            .frame(width: 624, height: 408)
-            .clipped()
-            .overlay(
-                Rectangle()
-                    .strokeBorder(Color.black.opacity(0.5), lineWidth: 4)
-                    .allowsHitTesting(false)
-            )
+            previewPicture
+                .frame(width: 624, height: 408)
+                .clipped()
+                .overlay(
+                    Rectangle()
+                        .strokeBorder(Color.black.opacity(0.5), lineWidth: 4)
+                        .allowsHitTesting(false)
+                )
 
             // Control bar on the bottom of the frame: ▼  CH 401  ▲ ........ SPELUNKR.TV
             HStack(spacing: 14) {
@@ -243,6 +220,104 @@ struct GuideHome: View {
                 .padding(borderWidth)
         }
         .frame(width: 640, height: 480)
+    }
+
+    private var cableGuideHeader: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let now = context.date.timeIntervalSince1970 * 1000
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 32) {
+                    Text("SPELUNKR").font(theme.heading(46)).foregroundStyle(theme.accent)
+                    Text("PROGRAM GUIDE").font(theme.label(30)).foregroundStyle(theme.primaryText)
+                    Spacer()
+                    Text(context.date, format: .dateTime.weekday(.abbreviated).hour().minute())
+                        .font(theme.time(30))
+                        .foregroundStyle(theme.softText)
+                }
+                HStack(alignment: .top, spacing: 52) {
+                    if let channel = activeChannel {
+                        cableProgramDetails(channel, now: now)
+                    }
+                    Spacer(minLength: 0)
+                    previewPicture
+                        .frame(width: 576, height: 324)
+                        .clipShape(RoundedRectangle(cornerRadius: theme.cellCornerRadius))
+                }
+            }
+        }
+    }
+
+    private func cableProgramDetails(_ channel: ChannelInfo, now: Double) -> some View {
+        let _ = store.detailsRevision
+        let airing = store.guide[channel.id]?.first { $0.startMs <= now && now < $0.endMs }
+        let tuned = store.tv.channel?.id == channel.id ? store.tv.onAir : nil
+        let title = inspectedBlock?.title ?? airing?.title ?? tuned?.displayTitle ?? "Tuning…"
+        let start = inspectedBlock?.startMs ?? airing?.startMs ?? tuned?.startMs
+        let end = inspectedBlock?.endMs ?? airing?.endMs ?? tuned?.endMs
+        let description = store.detail(
+            channelID: channel.id,
+            version: inspectedBlock == nil ? (airing?.version ?? tuned?.version) : inspectedBlock?.version,
+            videoIndex: inspectedBlock == nil ? (airing?.videoIndex ?? tuned?.videoIndex) : inspectedBlock?.videoIndex
+        )?.description ?? channel.description
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 20) {
+                if let rows = channel.logomark?.rows, !rows.isEmpty {
+                    LogomarkView(rows: rows, primaryColor: channel.color, size: 82)
+                } else if let emoji = channel.emoji {
+                    Text(emoji).font(.system(size: 58)).frame(width: 82, height: 82)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("CH \(channel.dialText)").font(theme.time(26)).foregroundStyle(theme.mutedText)
+                    Text(channel.name.uppercased()).font(theme.channelName(40)).foregroundStyle(theme.secondaryAccent)
+                        .lineLimit(1)
+                }
+            }
+            Text(title).font(theme.heading(38)).foregroundStyle(theme.primaryText).lineLimit(1)
+            if let start, let end {
+                Text("\(Theme.formatTime12(start)) – \(Theme.formatTime12(end))")
+                    .font(theme.time(26)).foregroundStyle(theme.mutedText)
+            }
+            if let description {
+                Text(description).font(theme.body(25)).foregroundStyle(theme.softText).lineLimit(2)
+            }
+            Spacer(minLength: 0)
+            guideActions(for: channel)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: 324)
+    }
+
+    private var previewPicture: some View {
+        let ch = activeChannel
+        let tv = store.tv
+        // The preview is only valid for the highlighted channel; between a row change and the retune
+        // it must not show the previous channel's last frame.
+        let isTunedToChannel = ch != nil && tv.channel?.id == ch?.id
+
+        return ZStack {
+            Color.black
+
+            PlayerLayerView(player: tv.video, correction: tv.correction, videoSize: tv.videoSize)
+                .opacity(isTunedToChannel && tv.phase == .playing ? 1 : 0)
+
+            if !isTunedToChannel {
+                previewTuningOverlay(channel: ch, caption: ch?.isWatchable == false ? "COMING SOON" : "TUNING…")
+            } else {
+                switch tv.phase {
+                case .idle, .tuning:
+                    previewTuningOverlay(channel: ch, caption: "TUNING…")
+                case .card:
+                    if let item = tv.onAir, let playingCh = tv.channel {
+                        BumpCardView(item: item, channel: playingCh)
+                    }
+                case .problem(let message):
+                    previewTuningOverlay(channel: ch, caption: message)
+                case .playing:
+                    EmptyView()
+                }
+            }
+        }
     }
 
     private func previewTuningOverlay(channel: ChannelInfo?, caption: String) -> some View {
@@ -489,7 +564,7 @@ struct GuideHome: View {
             Button {
                 present(.themePicker, returningTo: .themeMode)
             } label: {
-                Text("Theme Mode")
+                Text(theme.usesCableLayout ? "SETTINGS" : "Theme Mode")
                     .font(theme.button(26))
                     .foregroundStyle(theme.primaryText)
                     .wsShadow()
@@ -730,6 +805,7 @@ private struct ChannelScheduleSheet: View {
         .padding(.horizontal, 80)
         .padding(.vertical, 60)
         .background(theme.screenBackground.ignoresSafeArea())
+        .cableScanlines()
         .onExitCommand { onClose() }
         .task(id: DetailsRequest(channel)) {
             await store.ensureDetails(for: channel)
