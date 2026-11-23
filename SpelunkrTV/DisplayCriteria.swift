@@ -25,7 +25,11 @@ enum DisplayMatching {
     private static var displayManager: AVDisplayManager? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
-        return (scene?.keyWindow ?? scene?.windows.first)?.avDisplayManager
+        guard let window = scene?.keyWindow ?? scene?.windows.first,
+              // AVKit adds avDisplayManager to UIWindow, but it isn't there everywhere (the
+              // Simulator, for one), and calling a missing method crashes. Skip matching instead.
+              window.responds(to: NSSelectorFromString("avDisplayManager")) else { return nil }
+        return window.avDisplayManager
     }
 
     /// True when the viewer has turned on Match Frame Rate or Match Dynamic Range in Settings.
