@@ -40,6 +40,10 @@ final class BroadcastStore {
     @ObservationIgnored private var detailsInFlight: Set<String> = []
     @ObservationIgnored private var blocksCache: [String: [GuideBlock]] = [:]
     @ObservationIgnored private var started = false
+    @ObservationIgnored private var refreshInProgress = false
+    @ObservationIgnored private var guideRequest = 0
+
+    var canRetryStartup: Bool { engine != nil }
 
     init() {
         engine = try? ScheduleEngine()
@@ -78,11 +82,15 @@ final class BroadcastStore {
         }
     }
 
-    func refresh() async {
+    func refresh(userInitiated: Bool = false) async {
         guard let engine else {
             status = .failed("The schedule engine is missing from the app bundle.")
             return
         }
+        if userInitiated && channels.isEmpty { status = .loading }
+        guard !refreshInProgress else { return }
+        refreshInProgress = true
+        defer { refreshInProgress = false }
         do {
             let (lineup, base) = try await Self.fetchLineup()
             dataBase = base
@@ -110,8 +118,12 @@ final class BroadcastStore {
             let manifests: [(String, VersionPointer, String)] = await withTaskGroup(of: (String, VersionPointer, String)?.self) { group in
                 for (channel, pointer) in needed {
                     group.addTask {
-                        guard let url = URL(string: pointer.manifest, relativeTo: base),
-                              let text = try? await Self.fetchText(url.absoluteURL) else { return nil }
+                        guard let text = await Self.fetchResource(pointer.manifest, base: base, validating: {
+                            guard let manifest = (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any],
+                                  manifest["items"] is [Any] else { return false }
+                            let platform = manifest["platform"]
+                            return platform == nil || platform is NSNull || platform is String
+                        }) else { return nil }
                         return (channel, pointer, text)
                     }
                 }
@@ -126,9 +138,9 @@ final class BroadcastStore {
                 guard let path = (try? JSONDecoder().decode(ManifestHead.self, from: Data(text.utf8)))?.platform,
                       platformCache[path] == nil,
                       attemptedPlatforms.insert(path).inserted,
-                      let url = URL(string: path, relativeTo: base),
-                      let platform = try? await Self.fetchText(url.absoluteURL),
-                      (try? JSONSerialization.jsonObject(with: Data(platform.utf8))) is [String: Any] else { continue }
+                      let platform = await Self.fetchResource(path, base: base, validating: {
+                          (try? JSONSerialization.jsonObject(with: Data($0.utf8))) is [String: Any]
+                      }) else { continue }
                 platformCache[path] = platform
             }
 
@@ -151,12 +163,13 @@ final class BroadcastStore {
                 let onAir = await engine.onAir(channel: ch.id, atMs: Date.nowMs)
                 if onAir != nil { ready.append(ch) }
             }
-            channels = ready
-            if addedVersion {
+            let previousIDs = channels.map(\.id)
+            if !ready.isEmpty || channels.isEmpty { channels = ready }
+            if addedVersion || previousIDs != channels.map(\.id) {
                 blocksCache.removeAll()
                 scheduleRevision += 1
             }
-            status = ready.isEmpty ? .failed("No channels could be loaded.") : .ready
+            status = channels.isEmpty ? .failed("No channels could be loaded.") : .ready
             await refreshGuide()
         } catch {
             if channels.isEmpty {
@@ -169,10 +182,14 @@ final class BroadcastStore {
     func refreshGuide() async {
         guard let engine, status == .ready else { return }
         let now = Date.nowMs
+        guideRequest += 1
+        let request = guideRequest
+        let revision = scheduleRevision
         var g: [String: [GuideEntry]] = [:]
         for ch in channels {
             g[ch.id] = await engine.upcoming(channel: ch.id, atMs: now, count: 4)
         }
+        guard revision == scheduleRevision, request == guideRequest else { return }
         guide = g
         await prefetchServers(engine: engine, at: now)
     }
@@ -195,7 +212,9 @@ final class BroadcastStore {
         let key = "\(channelID)|\(Int64(fromMs))|\(Int64(toMs))"
         if let cached = blocksCache[key] { return cached }
         guard let engine else { return [] }
+        let revision = scheduleRevision
         let computed = await engine.blocks(channel: channelID, fromMs: fromMs, toMs: toMs)
+        guard revision == scheduleRevision else { return [] }
         if blocksCache.count > 240 { blocksCache.removeAll() }
         blocksCache[key] = computed
         return computed
@@ -203,7 +222,9 @@ final class BroadcastStore {
 
     func programs(for channelID: String, fromMs: Double, toMs: Double) async -> [GuideProgram] {
         guard let engine else { return [] }
-        return await engine.range(channel: channelID, fromMs: fromMs, toMs: toMs)
+        let revision = scheduleRevision
+        let programs = await engine.range(channel: channelID, fromMs: fromMs, toMs: toMs)
+        return revision == scheduleRevision ? programs : []
     }
 
     // MARK: - Show details (blurbs)
@@ -237,6 +258,17 @@ final class BroadcastStore {
     private nonisolated static func fetchDetails(_ url: URL) async throws -> DetailsFile {
         let text = try await fetchText(url)
         return try JSONDecoder().decode(DetailsFile.self, from: Data(text.utf8))
+    }
+
+    private nonisolated static func fetchResource(_ path: String, base: URL,
+                                                  validating: @Sendable (String) -> Bool) async -> String? {
+        var attempted = Set<URL>()
+        for source in [base] + sources {
+            guard let url = URL(string: path, relativeTo: source)?.absoluteURL,
+                  attempted.insert(url).inserted else { continue }
+            if let text = try? await fetchText(url), validating(text) { return text }
+        }
+        return nil
     }
 
     nonisolated static func fetchLineup() async throws -> (Lineup, URL) {

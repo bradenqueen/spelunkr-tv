@@ -107,10 +107,10 @@ struct ThemePicker: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(option.name)
-                        .font(theme.heading(36))
+                        .font(theme.heading(theme.guideLayout == .largePrint ? 46 : 36))
                         .foregroundStyle(theme.primaryText)
                     Text(option.summary)
-                        .font(theme.body(26))
+                        .font(theme.body(theme.guideLayout == .largePrint ? 38 : 26))
                         .foregroundStyle(theme.softText)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

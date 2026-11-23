@@ -43,6 +43,7 @@ struct RootView: View {
     @Environment(BroadcastStore.self) private var store
     @State private var selectedChannel: ChannelInfo?
     @State private var isFullScreen = false
+    @State private var playbackOrigin: GuidePlaybackOrigin?
 
     var body: some View {
         ZStack {
@@ -50,6 +51,12 @@ struct RootView: View {
                 switch store.status {
                 case .failed(let message):
                     StaticView(caption: message)
+                        .overlay(alignment: .bottom) {
+                            if store.canRetryStartup {
+                                Button("Retry") { Task { await store.refresh(userInitiated: true) } }
+                                    .padding(.bottom, 120)
+                            }
+                        }
                 default:
                     StaticView(caption: "ADJUSTING THE ANTENNA…")
                 }
@@ -63,7 +70,7 @@ struct RootView: View {
                 }
                 .environment(\.colorScheme, .dark)
             } else {
-                GuideHome(selectedChannel: $selectedChannel) { channel in
+                GuideHome(selectedChannel: $selectedChannel, playbackOrigin: $playbackOrigin) { channel in
                     guard let channel = store.channels.first(where: { $0.id == channel.id }), channel.isWatchable else { return }
                     selectedChannel = channel
                     if store.tv.channel?.id != channel.id {

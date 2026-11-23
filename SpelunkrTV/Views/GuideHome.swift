@@ -1,10 +1,20 @@
 import SwiftUI
 
+/// The guide is removed while the player owns the screen.
+struct GuidePlaybackOrigin {
+    let channelID: String
+    let target: GuideFocus?
+    let fullGuide: Bool
+    let windowStartMs: Double
+    let browseChannelID: String?
+}
+
 /// Shared navigation, channel selection, and preview tuning for the timeline and browse layouts.
 struct GuideHome: View {
     @Environment(\.appTheme) private var theme
     @Environment(BroadcastStore.self) private var store
     @Binding var selectedChannel: ChannelInfo?
+    @Binding var playbackOrigin: GuidePlaybackOrigin?
     let onWatch: (ChannelInfo) -> Void
 
     @State private var inspectedBlock: GuideBlock?
@@ -13,7 +23,6 @@ struct GuideHome: View {
     @State private var focusAfterDismissal: GuideFocus?
     @State private var showingFullGuide = false
     @State private var browseFocusRequest: BrowseFocusRequest?
-    @State private var lastBrowseFocus: GuideFocus?
     @State private var channelBeforeFullGuide: ChannelInfo?
     @State private var hasAppeared = false
     @State private var previewDebounceTask: Task<Void, Never>?
@@ -35,7 +44,9 @@ struct GuideHome: View {
     }
 
     private var activeChannel: ChannelInfo? {
-        store.channels.first { $0.id == selectedChannel?.id } ?? store.watchableChannels.first ?? store.channels.first
+        store.channels.first { $0.id == selectedChannel?.id && $0.isWatchable }
+            ?? store.channels.first(where: \.isWatchable)
+            ?? store.channels.first
     }
 
     var body: some View {
@@ -82,19 +93,42 @@ struct GuideHome: View {
             // A cover can hide and reveal this guide without replacing its state.
             guard !hasAppeared else { return }
             hasAppeared = true
-            if selectedChannel == nil, let first = store.watchableChannels.first {
-                selectedChannel = first
-                schedulePreviewTune(for: first, immediate: true)
-            } else if let current = activeChannel {
-                schedulePreviewTune(for: current, immediate: store.tv.channel == nil)
+            if let channel = activeChannel, channel.isWatchable {
+                selectedChannel = channel
+                schedulePreviewTune(for: channel, immediate: store.tv.channel == nil)
+            } else {
+                selectedChannel = nil
             }
-            focusLiveProgram()
+            if let origin = playbackOrigin {
+                playbackOrigin = nil
+                restorePlayerOrigin(origin)
+            } else {
+                focusLiveProgram()
+            }
+        }
+        .onChange(of: store.watchableChannels.map(\.id)) { _, ids in
+            switch presentation {
+            case .channelSchedule(let channel), .program(let channel, _):
+                if !ids.contains(channel.id) { presentation = nil }
+            default:
+                break
+            }
+            guard !ids.contains(selectedChannel?.id ?? "") else { return }
+            selectedChannel = store.watchableChannels.first
+            inspectedBlock = nil
+            if ids.isEmpty {
+                previewDebounceTask?.cancel()
+                store.tv.stop()
+                store.presence.track(channelID: nil)
+                focus = showingFullGuide ? .backToBrowse : .themeMode
+            } else {
+                focusLiveProgram()
+            }
         }
         .onChange(of: theme.guideLayout) { _, _ in
             showingFullGuide = false
             focusIntent = nil
             browseFocusRequest = nil
-            lastBrowseFocus = nil
             if let channel = activeChannel {
                 schedulePreviewTune(for: channel, immediate: true)
             }
@@ -108,7 +142,6 @@ struct GuideHome: View {
             default:
                 return
             }
-            lastBrowseFocus = target
             if selectedChannel?.id != id, let channel = store.channels.first(where: { $0.id == id }) {
                 selectedChannel = channel
             }
@@ -130,9 +163,9 @@ struct GuideHome: View {
             switch presented {
             case .channelSchedule(let channel):
                 ChannelScheduleSheet(channel: store.channels.first { $0.id == channel.id } ?? channel) {
+                    watch(channel)
                     focusAfterDismissal = nil
                     presentation = nil
-                    watch(channel)
                 } onClose: {
                     presentation = nil
                 }
@@ -167,6 +200,7 @@ struct GuideHome: View {
             windowStartMs: $windowStartMs,
             focusIntent: $focusIntent,
             focus: $focus,
+            emptyGridFocus: showingFullGuide ? .backToBrowse : .themeMode,
             onWatch: watch
         )
         .frame(maxHeight: .infinity)
@@ -210,12 +244,23 @@ struct GuideHome: View {
                 VStack(alignment: .leading) {
                     Text("Full Guide").font(theme.heading(46))
                     if let channel = activeChannel {
-                        Text(inspectedBlock?.title ?? channel.name).font(theme.body(30))
-                    }
-                    if let block = inspectedBlock {
-                        Text("\(Theme.formatTime12(block.startMs)) – \(Theme.formatTime12(block.endMs))")
-                            .font(theme.time(24))
-                            .foregroundStyle(theme.mutedText)
+                        TimelineView(.everyMinute) { context in
+                            let now = context.date.timeIntervalSince1970 * 1000
+                            let live = store.guide[channel.id]?.first { $0.startMs <= now && now < $0.endMs }
+                            let start = inspectedBlock?.startMs ?? live?.startMs
+                            let end = inspectedBlock?.endMs ?? live?.endMs
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(inspectedBlock?.title ?? live?.title ?? channel.name)
+                                    .font(theme.body(theme.guideLayout == .largePrint ? 42 : 32))
+                                    .lineLimit(2, reservesSpace: true)
+                                if let start, let end {
+                                    Text("\(channel.name) · \(inspectedBlock == nil ? "Live · " : "")\(Theme.formatTime12(start)) – \(Theme.formatTime12(end))")
+                                        .font(theme.time(theme.guideLayout == .largePrint ? 34 : 24))
+                                        .lineLimit(1)
+                                        .foregroundStyle(theme.mutedText)
+                                }
+                            }
+                        }
                     }
                 }
                 Spacer()
@@ -237,18 +282,17 @@ struct GuideHome: View {
         showingFullGuide = false
         focusIntent = nil
         inspectedBlock = nil
-        if let channel = channelBeforeFullGuide { selectedChannel = channel }
+        if let channel = store.watchableChannels.first(where: { $0.id == channelBeforeFullGuide?.id }) { selectedChannel = channel }
         channelBeforeFullGuide = nil
-        if let target = lastBrowseFocus ?? activeChannel.map({ GuideFocus.browseChannel($0.id) }) {
-            browseFocusRequest = BrowseFocusRequest(target: target)
-        } else {
-            focus = .fullGuide
-        }
+        browseFocusRequest = BrowseFocusRequest(target: .fullGuide)
     }
 
     private func browseButton(_ title: String, target: GuideFocus, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title).font(theme.button(28)).foregroundStyle(theme.primaryText)
+            Text(title)
+                .font(theme.button(theme.guideLayout == .largePrint ? 36 : 28))
+                .foregroundStyle(theme.primaryText)
+                .fixedSize()
         }
         .buttonStyle(SpelunkrActionButtonStyle(background: AnyShapeStyle(theme.raisedSurface)))
         .focused($focus, equals: target)
@@ -417,13 +461,13 @@ struct GuideHome: View {
                         .lineLimit(1)
                 }
             }
-            Text(title).font(theme.heading(38)).foregroundStyle(theme.primaryText).lineLimit(1)
+            Text(title).font(theme.heading(38)).foregroundStyle(theme.primaryText).lineLimit(inspectedBlock == nil ? 1 : 2)
             if let start, let end {
                 Text("\(Theme.formatTime12(start)) – \(Theme.formatTime12(end))")
                     .font(theme.time(26)).foregroundStyle(theme.mutedText)
             }
             if let description {
-                Text(description).font(theme.body(25)).foregroundStyle(theme.softText).lineLimit(2)
+                Text(description).font(theme.body(25)).foregroundStyle(theme.softText).lineLimit(inspectedBlock == nil ? 2 : 1)
             }
             Spacer(minLength: 0)
             guideActions(for: channel)
@@ -570,11 +614,13 @@ struct GuideHome: View {
                         }
                         .frame(height: 52)
 
-                        Text(ch.description ?? "")
-                            .font(theme.body(23))
-                            .foregroundStyle(theme.mutedText)
-                            .lineLimit(2)
-                            .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56, alignment: .topLeading)
+                        if inspectedBlock == nil {
+                            Text(ch.description ?? "")
+                                .font(theme.body(23))
+                                .foregroundStyle(theme.mutedText)
+                                .lineLimit(2)
+                                .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56, alignment: .topLeading)
+                        }
 
                         panelDivider
 
@@ -588,7 +634,7 @@ struct GuideHome: View {
                                 Text(program.title)
                                     .font(theme.heading(44))
                                     .foregroundStyle(theme.primaryText)
-                                    .lineLimit(1)
+                                    .lineLimit(inspectedBlock == nil ? 1 : 2)
                                     .truncationMode(.tail)
                                     .wsShadow()
 
@@ -750,9 +796,41 @@ struct GuideHome: View {
 
     // MARK: - Preview Tuning & Channel Stepping
 
+    private func restorePlayerOrigin(_ origin: GuidePlaybackOrigin) {
+        showingFullGuide = origin.fullGuide && theme.guideLayout != .timeline
+        channelBeforeFullGuide = store.watchableChannels.first { $0.id == origin.browseChannelID }
+        guard let current = activeChannel, current.isWatchable else {
+            focus = showingFullGuide ? .backToBrowse : .themeMode
+            return
+        }
+        guard current.id == origin.channelID, let target = origin.target else {
+            focusLiveProgram(preferLiveProgram: true)
+            return
+        }
+        windowStartMs = max(origin.windowStartMs, GuideGrid.currentHalfHourMs())
+        switch target {
+        case .browseSchedule, .browseUpcoming, .browseChannel:
+            browseFocusRequest = BrowseFocusRequest(target: target)
+        case .cell:
+            requestGridFocus()
+        default:
+            Task { @MainActor in
+                await Task.yield()
+                focus = target
+            }
+        }
+    }
+
     private func watch(_ channel: ChannelInfo) {
-        guard channel.isWatchable else { return }
+        guard let channel = store.watchableChannels.first(where: { $0.id == channel.id }) else { return }
         previewDebounceTask?.cancel()
+        playbackOrigin = GuidePlaybackOrigin(
+            channelID: channel.id,
+            target: focusAfterDismissal ?? focus,
+            fullGuide: showingFullGuide,
+            windowStartMs: windowStartMs,
+            browseChannelID: channelBeforeFullGuide?.id
+        )
         onWatch(channel)
     }
 
@@ -800,11 +878,14 @@ struct GuideHome: View {
     }
 
     private func requestGridFocus() {
-        guard let channel = activeChannel, channel.isWatchable else { return }
+        guard let channel = activeChannel, channel.isWatchable else {
+            focus = showingFullGuide ? .backToBrowse : .themeMode
+            return
+        }
         let nowMs = Date.nowMs
         windowStartMs = GuideGrid.currentHalfHourMs(from: nowMs)
         inspectedBlock = nil
-        focusIntent = GuideGrid.FocusIntent(channelID: channel.id, atMs: nowMs)
+        focusIntent = GuideGrid.FocusIntent(channelID: channel.id, atMs: nowMs, requiresLive: true)
     }
 
     private func stepChannel(by delta: Int) {
@@ -878,7 +959,13 @@ private struct ChannelScheduleSheet: View {
     let onWatch: () -> Void
     let onClose: () -> Void
 
-    @State private var programs: [GuideProgram] = []
+    @State private var programs: [GuideProgram]?
+
+    private struct ListingsRequest: Equatable {
+        let channelID: String
+        let revision: Int
+        let halfHour: Double
+    }
 
     var body: some View {
         let _ = store.detailsRevision
@@ -925,50 +1012,31 @@ private struct ChannelScheduleSheet: View {
                 GuideBackButton(onBack: onClose)
             }
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(programs) { program in
-                        let now = Date.nowMs
-                        let airing = program.isAiring(atMs: now)
-                        let blurb = store.detail(channelID: channel.id, version: program.version, videoIndex: program.videoIndex)?.description
-
-                        // Focusable so the remote can scroll through the day's schedule.
-                        ScheduleRowFrame(airing: airing) {
-                            HStack(alignment: .top, spacing: 20) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(Theme.formatTime12(program.startMs))
-                                        .font(theme.time(26))
-                                        .foregroundStyle(theme.accent)
-                                    Text(formatDuration(program.durationS))
-                                        .font(theme.label(23))
-                                        .foregroundStyle(theme.mutedText)
-                                }
-                                .frame(width: 190, alignment: .leading)
-
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack(spacing: 10) {
-                                        if airing { LiveBadge() }
-                                        Text(program.title)
-                                            .font(theme.heading(32))
-                                            .foregroundStyle(theme.primaryText)
-                                        if let year = program.year {
-                                            Text(year)
-                                                .font(theme.label(24))
-                                                .foregroundStyle(theme.secondaryAccent)
-                                        }
-                                    }
-                                    if let blurb, !blurb.isEmpty {
-                                        Text(blurb)
-                                            .font(theme.body(24))
-                                            .foregroundStyle(theme.softText)
-                                            .lineLimit(2)
-                                    }
-                                }
-                                Spacer()
-                            }
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let now = context.date.timeIntervalSince1970 * 1000
+                let request = ListingsRequest(channelID: channel.id, revision: store.scheduleRevision,
+                                              halfHour: GuideGrid.currentHalfHourMs(from: now))
+                Group {
+                    if let programs {
+                        let visible = programs.filter { $0.endMs > now && $0.startMs < now + 86_400_000 }
+                        if visible.isEmpty {
+                            Text("Schedule unavailable").font(theme.body(28)).foregroundStyle(theme.mutedText)
+                        } else {
+                            listings(visible, now: now)
                         }
-                        .focusable()
+                    } else {
+                        ProgressView("Loading schedule…")
                     }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .task(id: request) {
+                    let updated = await store.programs(
+                        for: request.channelID,
+                        fromMs: request.halfHour,
+                        toMs: request.halfHour + GuideGrid.stepMs + 86_400_000
+                    )
+                    guard !Task.isCancelled, request.revision == store.scheduleRevision else { return }
+                    programs = updated
                 }
             }
         }
@@ -979,8 +1047,54 @@ private struct ChannelScheduleSheet: View {
         .onExitCommand { onClose() }
         .task(id: DetailsRequest(channel)) {
             await store.ensureDetails(for: channel)
-            let now = Date.nowMs
-            programs = await store.programs(for: channel.id, fromMs: now, toMs: now + 24 * 3600 * 1000)
+        }
+    }
+
+    private func listings(_ programs: [GuideProgram], now: Double) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                ForEach(programs) { program in
+                    let airing = program.isAiring(atMs: now)
+                    let blurb = store.detail(channelID: channel.id, version: program.version, videoIndex: program.videoIndex)?.description
+
+                    // Focusable so the remote can scroll through the day's schedule.
+                    ScheduleRowFrame(airing: airing) {
+                        HStack(alignment: .top, spacing: 20) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(Theme.formatTime12(program.startMs))
+                                    .font(theme.time(26))
+                                    .foregroundStyle(theme.accent)
+                                Text(formatDuration(program.durationS))
+                                    .font(theme.label(23))
+                                    .foregroundStyle(theme.mutedText)
+                            }
+                            .frame(width: 190, alignment: .leading)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 10) {
+                                    if airing { LiveBadge() }
+                                    Text(program.title)
+                                        .font(theme.heading(32))
+                                        .foregroundStyle(theme.primaryText)
+                                    if let year = program.year {
+                                        Text(year)
+                                            .font(theme.label(24))
+                                            .foregroundStyle(theme.secondaryAccent)
+                                    }
+                                }
+                                if let blurb, !blurb.isEmpty {
+                                    Text(blurb)
+                                        .font(theme.body(24))
+                                        .foregroundStyle(theme.softText)
+                                        .lineLimit(2)
+                                }
+                            }
+                            Spacer()
+                        }
+                    }
+                    .focusable()
+                }
+            }
         }
     }
 }

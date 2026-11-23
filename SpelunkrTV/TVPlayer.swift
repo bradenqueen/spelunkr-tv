@@ -36,6 +36,8 @@ final class TVPlayer {
     @ObservationIgnored private var tuneTask: Task<Void, Never>?
     @ObservationIgnored private var boundaryTask: Task<Void, Never>?
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
+    @ObservationIgnored private var bufferingSince: ContinuousClock.Instant?
+    @ObservationIgnored private var retriedStall = false
     @ObservationIgnored private var lastCorrectionMs: Double = 0
     @ObservationIgnored private var seekLag: Double = 0.8
     private let warmer = TapeWarmer()
@@ -74,6 +76,7 @@ final class TVPlayer {
         endTuneSignpost()
         tuneStartMs = Date.nowMs
         tuneSignpost = TuneLog.signposter.beginInterval("tune", id: TuneLog.signposter.makeSignpostID())
+        retriedStall = false
         channel = ch
         tlog("tune requested (was \(previousDescription()))")
         onAir = nil
@@ -218,11 +221,19 @@ final class TVPlayer {
             tape = prepared
             source = resolved.source.description
         }
-        var usedDirect = tape.url != url
+        let usedDirect = tape.url != url
         source += tape.usesRanges ? ", range loader" : ", AVFoundation"
         let wasWarm = warmed?.ready ?? false
         tlog("\(warmed == nil ? "warm miss" : (wasWarm ? "warm hit, header ready" : "warm hit, header still loading")); direct URL \(usedDirect ? "yes" : "no") [\(source)]; \(TuneLog.short(url)); moov \(item.moov.map { "\($0)" } ?? "?"), offset \(Int(item.expectedPosition(atMs: Date.nowMs)))s")
 
+        await startTape(tape, canonical: url, scheduled: item, volume: tapeVolume, source: source)
+    }
+
+    private func startTape(_ initialTape: TapeLoader.Tape, canonical url: URL, scheduled item: OnAir,
+                           volume tapeVolume: Float, source initialSource: String) async {
+        var tape = initialTape
+        var usedDirect = tape.url != url
+        var source = initialSource
         var playerItem = AVPlayerItem(asset: tape.asset)
         var createdMs = Date.nowMs
         var ready = false
@@ -246,7 +257,7 @@ final class TVPlayer {
             // moving anything, so the position is set right after readyToPlay below.
             // The range loader has already fetched the moov. Native loading needs more time for it.
             ready = await waitUntilReady(playerItem, timeout: tape.usesRanges ? 12 : 45)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, video.currentItem === playerItem else { return }
             tlog("item status \(Self.describe(playerItem.status)) (header \(Int(Date.nowMs - createdMs))ms after item created, \(usedDirect ? "direct" : "redirect") [\(source)])")
             if ready || !tape.usesRanges && !usedDirect { break }
             playerItem.cancelPendingSeeks()
@@ -418,6 +429,7 @@ final class TVPlayer {
     /// (an earlier tape carrying on under a "can't play" card).
     private func silenceTape(resetDisplay: Bool = true) {
         stopObservingEnd()
+        bufferingSince = nil
         displayTask?.cancel()
         if resetDisplay { DisplayMatching.reset() }
         stopOverlay()
@@ -722,7 +734,7 @@ final class TVPlayer {
         monitorTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
-                guard let self else { return }
+                guard !Task.isCancelled, let self else { return }
                 self.checkPlayback()
             }
         }
@@ -735,6 +747,7 @@ final class TVPlayer {
             refreshCorrection()
         }
         guard case .playing = phase, let item = onAir, item.isTape, let current = video.currentItem else {
+            bufferingSince = nil
             isBuffering = false
             return
         }
@@ -745,19 +758,54 @@ final class TVPlayer {
         }
         isBuffering = video.timeControlStatus == .waitingToPlayAtSpecifiedRate
         if isBuffering {
-            TuneLog.debug("[\(channel?.id ?? "-")] buffering: \(video.reasonForWaitingToPlay?.rawValue ?? "none")")
+            let now = ContinuousClock().now
+            if let since = bufferingSince {
+                if since.duration(to: now) >= .seconds(20) {
+                    recoverStall(current: current, scheduled: item)
+                }
+            } else {
+                bufferingSince = now
+            }
+            return
         }
+        bufferingSince = nil
         // Only while it is really playing: a tape that ended early sits paused at its last frame,
         // and seeking it again would achieve nothing.
-        guard !isBuffering, video.timeControlStatus == .playing, Date.nowMs - lastCorrectionMs > 20_000 else { return }
+        guard video.timeControlStatus == .playing, Date.nowMs - lastCorrectionMs > 20_000 else { return }
         let drift = video.currentTime().seconds - item.expectedPosition(atMs: Date.nowMs)
         if abs(drift) > 3 {
             lastCorrectionMs = Date.nowMs
             Task { [weak self] in
                 // Don't seek whatever is loaded now to the position of a tape that has since changed.
-                guard let self, self.onAir?.key == item.key, case .playing = self.phase else { return }
+                guard let self, self.onAir?.key == item.key, self.video.currentItem === current,
+                      case .playing = self.phase else { return }
                 await self.seekToBroadcast(item)
             }
+        }
+    }
+
+    private func recoverStall(current: AVPlayerItem, scheduled item: OnAir) {
+        guard video.currentItem === current, let channel, onAir?.key == item.key,
+              Date.nowMs < item.endMs else { return }
+        bufferingSince = nil
+        tuneTask?.cancel()
+        guard !retriedStall, let url = tapeURL else {
+            silenceTape()
+            phase = .problem("This tape stopped playing. The next show starts at \(formatClock(item.endMs)).")
+            return
+        }
+        retriedStall = true
+        isBuffering = false
+        phase = .tuning
+        let volume = video.volume
+        stopObservingEnd()
+        current.cancelPendingSeeks()
+        tuneTask = Task { [weak self] in
+            guard let self, !Task.isCancelled, self.channel?.id == channel.id,
+                  self.onAir?.key == item.key, self.video.currentItem === current,
+                  Date.nowMs < item.endMs else { return }
+            await self.startTape(TapeLoader.nativeTape(url: url), canonical: url, scheduled: item,
+                                 volume: volume, source: "canonical stall retry")
         }
     }
 }

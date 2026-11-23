@@ -15,6 +15,12 @@ extension ThemeBrowseView {
                     Text(selectedProgramTitle(now: now))
                         .font(.system(size: 48, weight: .medium, design: .serif))
                         .lineLimit(2)
+                    if let channel = selectedChannel, let next = nextEntry(for: channel, now: now) {
+                        Text("Next · \(formatClock(next.startMs)) · \(next.title)")
+                            .font(theme.body(28))
+                            .foregroundStyle(theme.softText)
+                            .lineLimit(2)
+                    }
                 }
                 Spacer(minLength: 0)
             }
@@ -30,7 +36,8 @@ extension ThemeBrowseView {
             ScrollView {
                 LazyVStack(spacing: 10) {
                     ForEach(channels) { channel in
-                        browseButton(channel: channel, target: .browseChannel(channel.id), action: { onWatch(channel) }) {
+                        browseButton(channel: channel, target: .browseChannel(channel.id),
+                                     accessibilityLabel: stationLabel(for: channel, now: now, includeNext: true), action: { onWatch(channel) }) {
                             HStack(spacing: 26) {
                                 HStack(spacing: 16) {
                                     channelMark(channel, size: 52)
@@ -72,8 +79,8 @@ extension ThemeBrowseView {
                         .foregroundStyle(theme.accent)
                 }
                 Text(selectedProgramTitle(now: now))
-                    .font(theme.heading(47))
-                    .lineLimit(2)
+                    .font(theme.heading(42))
+                    .lineLimit(3, reservesSpace: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             VStack(alignment: .leading, spacing: 12) {
@@ -81,13 +88,14 @@ extension ThemeBrowseView {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         ForEach(channels) { channel in
-                            browseButton(channel: channel, target: .browseChannel(channel.id), action: { onWatch(channel) }) {
+                            browseButton(channel: channel, target: .browseChannel(channel.id),
+                                         accessibilityLabel: stationLabel(for: channel, now: now), action: { onWatch(channel) }) {
                                 HStack(spacing: 14) {
                                     channelMark(channel, size: 52)
                                     VStack(alignment: .leading, spacing: 5) {
                                         Text("\(channel.dialText)  \(channel.name)").font(theme.channelName(24))
                                         Text(programTitle(for: channel, now: now))
-                                            .font(theme.body(20))
+                                            .font(theme.body(25))
                                             .foregroundStyle(theme.softText)
                                     }
                                     .lineLimit(2)
@@ -101,7 +109,7 @@ extension ThemeBrowseView {
                     .padding(6)
                 }
             }
-            .frame(width: 415)
+            .frame(width: 470)
         }
         .foregroundStyle(theme.primaryText)
     }
@@ -119,14 +127,15 @@ extension ThemeBrowseView {
                             .font(theme.label(26))
                             .foregroundStyle(theme.accent)
                     }
-                    Text(selectedProgramTitle(now: now)).font(theme.heading(44)).lineLimit(2)
+                    Text(selectedProgramTitle(now: now)).font(theme.heading(42)).lineLimit(3, reservesSpace: true)
                 }
                 Spacer(minLength: 0)
             }
             ScrollView {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 20), count: 4), spacing: 18) {
                     ForEach(channels) { channel in
-                        browseButton(channel: channel, target: .browseChannel(channel.id), action: { onWatch(channel) }) {
+                        browseButton(channel: channel, target: .browseChannel(channel.id),
+                                     accessibilityLabel: stationLabel(for: channel, now: now), action: { onWatch(channel) }) {
                             VStack(alignment: .leading, spacing: 10) {
                                 HStack {
                                     channelMark(channel, size: 68)
@@ -137,7 +146,7 @@ extension ThemeBrowseView {
                                 }
                                 Text(channel.name).font(theme.channelName(28)).lineLimit(1)
                                 Text(programTitle(for: channel, now: now))
-                                    .font(theme.body(21))
+                                    .font(theme.body(25))
                                     .foregroundStyle(theme.softText)
                                     .lineLimit(1)
                             }

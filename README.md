@@ -104,7 +104,7 @@ If the app starts but says "The schedule engine is missing from the app", step 2
 - Select a live program to watch it, or select an upcoming program to see its details
 - Press Play/Pause to jump to what's on now for the highlighted channel
 - Press Up from the first grid row to reach WATCH. Press Down from the top controls to return to the live program
-- From WATCH, move right to **Theme Mode** to choose a theme. **Cable Guide** uses a two-hour grid and a classic tuning display. In that theme, open **Settings** to switch themes or toggle CRT scanlines.
+- Open **Theme Mode** in the guide controls to choose a theme. **Cable Guide** uses a two-hour grid and a classic tuning display. In that theme, open **Settings** to switch themes or toggle CRT scanlines.
 - Daylight, Cinema, Channel Wall, Schedule Desk, Large Print, and Spotlight offer different ways to browse. Use **Full Guide** for the timeline, then **Back to Browse** or Menu/Back to return.
 - From View Channel or Theme Mode, use **Back to Guide** or Menu/Back to return to the control you came from
 - Menu/Back from the main guide: leave the app
@@ -112,7 +112,7 @@ If the app starts but says "The schedule engine is missing from the app", step 2
 **Watching**
 - Up / down: change channel (up = next higher channel number, wrapping around)
 - Left / right, click or Play/Pause: show the info banner (channel, title, time left, what is next)
-- Menu/Back: return to the guide (the guide reopens with that channel highlighted)
+- Menu/Back: return to the guide or browse screen you left. After changing channels, focus moves to the playing channel on that screen.
 
 ## Keeping in sync when spelunkr changes
 

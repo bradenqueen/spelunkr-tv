@@ -124,8 +124,13 @@ struct PlayerScreen: View {
     private func changeChannel(by delta: Int) {
         let list = store.watchableChannels
         guard !list.isEmpty else { return }
-        let index = list.firstIndex { $0.id == tv.channel?.id } ?? 0
-        let next = list[(index + delta + list.count) % list.count]
+        let next: ChannelInfo
+        if let index = list.firstIndex(where: { $0.id == tv.channel?.id }) {
+            guard list.count > 1 else { flashInfo(); return }
+            next = list[(index + delta + list.count) % list.count]
+        } else {
+            next = delta > 0 ? list[0] : list[list.count - 1]
+        }
         tv.tune(next)
         store.presence.track(channelID: next.id)
         flashInfo()

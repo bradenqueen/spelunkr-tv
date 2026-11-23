@@ -71,7 +71,7 @@ struct ThemeBrowseView<Preview: View>: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            TimelineView(.everyMinute) { context in
+            TimelineView(.periodic(from: .now, by: theme.guideLayout == .scheduleDesk ? 1 : 60)) { context in
                 let now = context.date.timeIntervalSince1970 * 1000
                 let request = scheduleRequest(now: now)
                 layout(now: now)
@@ -100,9 +100,12 @@ struct ThemeBrowseView<Preview: View>: View {
         guard let request else { return }
         try? await Task.sleep(for: .milliseconds(150))
         guard !Task.isCancelled else { return }
-        let now = Date.nowMs
-        let programs = await store.programs(for: request.channelID, fromMs: now, toMs: now + 86_400_000)
-        guard !Task.isCancelled else { return }
+        let programs = await store.programs(
+            for: request.channelID,
+            fromMs: request.halfHourStartMs,
+            toMs: request.halfHourStartMs + GuideGrid.stepMs + 86_400_000
+        )
+        guard !Task.isCancelled, store.scheduleRevision == request.revision else { return }
         loadedSchedule = LoadedSchedule(channelID: request.channelID, programs: programs)
     }
 
@@ -127,9 +130,28 @@ struct ThemeBrowseView<Preview: View>: View {
         store.guide[channel.id]?.first { $0.startMs > now }
     }
 
+    func stationLabel(for channel: ChannelInfo, now: Double, includeNext: Bool = false) -> String {
+        var parts = ["Channel \(channel.dialText)", channel.name]
+        if !channel.isWatchable {
+            parts.append("Coming soon")
+        } else {
+            if let entry = currentEntry(for: channel, now: now) {
+                parts.append("Live, \(entry.title), \(formatClock(entry.startMs))")
+            } else {
+                parts.append("No current listing")
+            }
+            if includeNext, let next = nextEntry(for: channel, now: now) {
+                parts.append("Next, \(next.title), \(formatClock(next.startMs))")
+            }
+        }
+        return parts.joined(separator: ", ")
+    }
+
     func browseButton<Label: View>(
         channel: ChannelInfo,
         target: GuideFocus,
+        accessibilityLabel: String,
+        opensDetails: Bool = false,
         action: @escaping () -> Void,
         @ViewBuilder label: () -> Label
     ) -> some View {
@@ -141,6 +163,8 @@ struct ThemeBrowseView<Preview: View>: View {
                 horizontalPadding: 0,
                 verticalPadding: 0
             ))
+            .accessibilityLabel(Text(accessibilityLabel))
+            .accessibilityHint(opensDetails ? Text("Shows program details") : Text("Watches this channel live"))
             .disabled(!channel.isWatchable)
             .opacity(channel.isWatchable ? 1 : 0.65)
             .focused(focus, equals: target)
