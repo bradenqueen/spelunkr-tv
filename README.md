@@ -18,6 +18,7 @@
 - Bump and station-ID cards between shows, with spelunkr's music
 - Overlay music channels (such as Vacation Slides), including the faint projector hum
 - Picture fixes from the site: squeezed tapes are stretched back to their real shape, and tapes with a baked-in black border are zoomed to fill the screen
+- Frame-rate and dynamic-range matching: if Match Content is on in the Apple TV settings, the TV switches to each tape's frame rate and range (some TVs blank briefly while switching)
 - Static and a message when a channel has nothing scheduled or a tape will not play, then it tunes again at the next show
 
 ## How it works

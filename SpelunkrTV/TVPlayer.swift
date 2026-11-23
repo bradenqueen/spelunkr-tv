@@ -83,6 +83,7 @@ final class TVPlayer {
         stopOverlay()
         stopHum()
         clearPicture()
+        DisplayMatching.reset()
         channel = nil
         onAir = nil
         phase = .idle
@@ -160,10 +161,23 @@ final class TVPlayer {
 
         videoSize = playerItem.presentationSize
         refreshCorrection()
+        matchDisplay(to: playerItem, key: item.key)
         await seekToBroadcast(item)
         guard !Task.isCancelled else { return }
         video.play()
         phase = .playing
+    }
+
+    /// Asks the TV to match the tape's frame rate and dynamic range (Match Content settings).
+    /// Runs alongside playback so it never delays the start, and is dropped if the tape has changed.
+    private func matchDisplay(to playerItem: AVPlayerItem, key: String) {
+        guard DisplayMatching.isEnabled else { return }
+        let asset = playerItem.asset
+        Task { [weak self] in
+            guard let target = await DisplayMatching.target(for: asset) else { return }
+            guard let self, self.onAir?.key == key, self.video.currentItem === playerItem else { return }
+            DisplayMatching.apply(target)
+        }
     }
 
     /// Stops whatever tape or card music was on, so a problem screen is never silent-but-wrong
@@ -410,10 +424,20 @@ enum ArchiveMedia {
         return await lookUpVideoFile(id: id)
     }
 
+    /// Plain http is blocked by App Transport Security, so addresses that come from schedule data
+    /// are upgraded to https (same host and path) before they are used.
+    static func secure(_ url: URL) -> URL {
+        guard url.scheme?.lowercased() == "http",
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return url }
+        parts.scheme = "https"
+        if parts.port == 80 { parts.port = nil }
+        return parts.url ?? url
+    }
+
     /// Address of an overlay-music file. The schedule gives the full address when it can; otherwise
     /// it is built from the item id and file name, or picked from the item's metadata (MP3 first).
     static func resolveAudio(id: String, file: String?, url: String?) async -> URL? {
-        if let url, let u = URL(string: url) { return u }
+        if let url, let u = URL(string: url) { return secure(u) }
         if let file, !file.isEmpty {
             let path = file.split(separator: "/", omittingEmptySubsequences: false).map { encodeComponent(String($0)) }.joined(separator: "/")
             return URL(string: "https://archive.org/download/\(id)/\(path)")
@@ -430,8 +454,6 @@ enum ArchiveMedia {
             ?? files.first { $0.format == "128Kbps MP3" }
             ?? files.first { $0.format == "64Kbps MP3" }
             ?? files.first { $0.name.hasSuffix(".mp3") }
-            ?? files.first { $0.format == "Ogg Vorbis" }
-            ?? files.first { $0.name.hasSuffix(".ogg") }
         guard let pick else { return nil }
         return URL(string: "https://archive.org/download/\(id)/\(encodeComponent(pick.name))")
     }
@@ -448,7 +470,11 @@ enum ArchiveMedia {
               let meta = try? JSONDecoder().decode(Metadata.self, from: result.0) else { return nil }
         let files = meta.files ?? []
         let pick = files.first { ($0.format ?? "").localizedCaseInsensitiveContains("h.264") }
-            ?? files.first { ($0.format ?? "").localizedCaseInsensitiveContains("mpeg4") }
+            // "512Kb MPEG4" is MPEG-4 Part 2, which AVPlayer can't play.
+            ?? files.first {
+                let f = $0.format ?? ""
+                return f.localizedCaseInsensitiveContains("mpeg4") && !f.localizedCaseInsensitiveContains("512Kb")
+            }
             ?? files.first { $0.name.lowercased().hasSuffix(".mp4") }
         guard let pick else { return nil }
         return URL(string: "https://archive.org/download/\(id)/\(encodeComponent(pick.name))")

@@ -60,6 +60,7 @@ struct PlayerScreen: View {
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
+            DisplayMatching.reset()
         }
         .onMoveCommand { direction in
             switch direction {
@@ -132,7 +133,9 @@ struct InfoBanner: View {
                 Spacer()
             }
             .foregroundStyle(.white)
-            .padding(36)
+            // tvOS title-safe margins
+            .padding(.horizontal, 80)
+            .padding(.vertical, 60)
             .background(
                 LinearGradient(colors: [.black.opacity(0.85), .black.opacity(0.55)],
                                startPoint: .top, endPoint: .bottom)

@@ -71,7 +71,7 @@ final class BroadcastStore {
         }
         do {
             let (lineup, base) = try await Self.fetchLineup()
-            if let a = lineup.audioBase, let u = URL(string: a) { audioBase = u }
+            if let a = lineup.audioBase, let u = URL(string: a) { audioBase = ArchiveMedia.secure(u) }
             if let e = lineup.engine, e > Self.supportedEngine {
                 engineWarning = "Spelunkr changed its schedule format (engine \(e)). Run tools/update-engine.mjs and rebuild, or some channels may drift."
             } else {
@@ -167,7 +167,7 @@ final class BroadcastStore {
     }
 
     nonisolated static func fetchText(_ url: URL) async throws -> String {
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        var request = URLRequest(url: ArchiveMedia.secure(url), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         request.setValue("SpelunkrTV/0.1 (tvOS)", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
