@@ -78,20 +78,13 @@ struct GuideGrid: View {
         }
         .onChange(of: focus.wrappedValue) { old, new in
             TuneLog.debug("[focus] \(String(describing: old)) -> \(String(describing: new))")
-            guard let new else { return }
+            guard let new, focusIntent == nil else { return }
             if case .cell = new { return }
-            // Focus left the grid: the next entry aims for "now" and the info panel goes back to
-            // the channel's live program.
+            // First-row Up is handled by handleMove. A modal can restore focus to any guide control.
+            focusRetry?.cancel()
+            pendingLanding = nil
             anchorMs = nil
             inspectedBlock = nil
-            // Up out of the grid goes to WATCH, not to whichever top control happens to be nearest.
-            if case .cell? = old, new != .watch {
-                Task { @MainActor in
-                    await Task.yield()
-                    if case .cell? = focus.wrappedValue { return }
-                    focus.wrappedValue = .watch
-                }
-            }
         }
     }
 

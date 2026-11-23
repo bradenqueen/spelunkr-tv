@@ -20,11 +20,15 @@ struct ThemePicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 36) {
-            Text("Theme Mode")
-                .font(theme.heading(62))
-                .foregroundStyle(theme.primaryText)
-                .accessibilityAddTraits(.isHeader)
-                .padding(.horizontal, 12)
+            HStack {
+                Text("Theme Mode")
+                    .font(theme.heading(62))
+                    .foregroundStyle(theme.primaryText)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                GuideBackButton(onBack: onClose)
+            }
+            .padding(.horizontal, 12)
 
             ScrollView {
                 VStack(spacing: 18) {
@@ -98,6 +102,12 @@ struct ThemePicker: View {
                             .strokeBorder(option.focusBorder, lineWidth: 2)
                     }
                     .padding(8)
+            }
+            .overlay(alignment: .topTrailing) {
+                Capsule()
+                    .fill(option.progressFill)
+                    .frame(width: 36, height: 4)
+                    .padding(12)
             }
             .overlay {
                 RoundedRectangle(cornerRadius: option.controlCornerRadius)

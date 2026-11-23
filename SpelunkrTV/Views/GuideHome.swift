@@ -80,6 +80,9 @@ struct GuideHome: View {
         .padding(.horizontal, 80)
         .padding(.vertical, 60)
         .background(theme.screenBackground.ignoresSafeArea())
+        .onPlayPauseCommand {
+            if presentation == nil, focusAfterDismissal == nil { focusLiveProgram() }
+        }
         .onAppear {
             // A cover can hide and reveal this guide without replacing its state.
             guard !hasAppeared else { return }
@@ -185,6 +188,7 @@ struct GuideHome: View {
                     horizontalPadding: 8,
                     verticalPadding: 4
                 ))
+                .accessibilityLabel("Previous channel")
                 .focused($focus, equals: .channelDown)
                 .onMoveCommand(perform: enterGrid)
 
@@ -210,6 +214,7 @@ struct GuideHome: View {
                     horizontalPadding: 8,
                     verticalPadding: 4
                 ))
+                .accessibilityLabel("Next channel")
                 .focused($focus, equals: .channelUp)
                 .onMoveCommand(perform: enterGrid)
 
@@ -546,8 +551,15 @@ struct GuideHome: View {
 
     /// Down from the top panel goes to the previewed channel's row, on the cell airing now.
     private func enterGrid(_ direction: MoveCommandDirection) {
-        guard direction == .down, let ch = activeChannel, ch.isWatchable else { return }
-        focusIntent = GuideGrid.FocusIntent(channelID: ch.id, atMs: Date.nowMs)
+        if direction == .down { focusLiveProgram() }
+    }
+
+    private func focusLiveProgram() {
+        guard let channel = activeChannel, channel.isWatchable else { return }
+        let nowMs = Date.nowMs
+        windowStartMs = GuideGrid.currentHalfHourMs(from: nowMs)
+        inspectedBlock = nil
+        focusIntent = GuideGrid.FocusIntent(channelID: channel.id, atMs: nowMs)
     }
 
     private func stepChannel(by delta: Int) {
@@ -557,6 +569,21 @@ struct GuideHome: View {
         let next = list[(idx + delta + list.count) % list.count]
         selectedChannel = next
         inspectedBlock = nil
+    }
+}
+
+struct GuideBackButton: View {
+    @Environment(\.appTheme) private var theme
+    let onBack: () -> Void
+
+    var body: some View {
+        Button(action: onBack) {
+            Label("Back to Guide", systemImage: "chevron.left")
+                .font(theme.button(24))
+                .foregroundStyle(theme.primaryText)
+                .fixedSize()
+        }
+        .buttonStyle(SpelunkrActionButtonStyle(background: AnyShapeStyle(theme.raisedSurface)))
     }
 }
 
@@ -649,6 +676,8 @@ private struct ChannelScheduleSheet: View {
                     verticalPadding: 12
                 ))
                 .disabled(!channel.isWatchable)
+
+                GuideBackButton(onBack: onClose)
             }
 
             ScrollView {

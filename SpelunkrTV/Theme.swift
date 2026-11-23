@@ -43,6 +43,7 @@ struct Theme: Identifiable {
     let panelBorderWidth: CGFloat
     let panelInnerBorderWidth: CGFloat
     let playerBorderWidth: CGFloat
+    let playerBannerCornerRadius: CGFloat
     let showsAnimatedStatic: Bool
     let statusCaptionFont: Font
     let statusCaptionBackground: Color
@@ -59,7 +60,7 @@ struct Theme: Identifiable {
 
     private enum Typography {
         case weatherStar
-        case system
+        case system(headingDesign: Font.Design)
     }
 
     static let classic: Theme = {
@@ -105,6 +106,7 @@ struct Theme: Identifiable {
             panelBorderWidth: 4,
             panelInnerBorderWidth: 2,
             playerBorderWidth: 3,
+            playerBannerCornerRadius: 0,
             showsAnimatedStatic: true,
             statusCaptionFont: .system(size: 40, weight: .heavy, design: .monospaced),
             statusCaptionBackground: .black.opacity(0.7),
@@ -165,6 +167,7 @@ struct Theme: Identifiable {
             panelBorderWidth: 1,
             panelInnerBorderWidth: 0,
             playerBorderWidth: 1,
+            playerBannerCornerRadius: 0,
             showsAnimatedStatic: false,
             statusCaptionFont: .system(size: 38, weight: .semibold),
             statusCaptionBackground: raisedSurface,
@@ -176,12 +179,82 @@ struct Theme: Identifiable {
             buttonFocusScale: 1.025,
             buttonBorderWidth: 1,
             showsTextShadow: false,
-            typography: .system
+            typography: .system(headingDesign: .default)
+        )
+    }()
+
+    static let neon: Theme = {
+        let brandSurface = rgb(0x1C1927)
+        let baseSurface = rgb(0x090A10)
+        let raisedSurface = rgb(0x20212E)
+        let mint = rgb(0x8FFFE1)
+        let pink = rgb(0xFFACEF)
+        let violet = rgb(0xAF9CFF)
+        let lime = rgb(0xE0FA80)
+
+        return Theme(
+            id: "neon",
+            name: "Neon",
+            summary: "A floating player banner and graphite panels with mint, pink, and violet accents.",
+            brandSurface: brandSurface,
+            gridHeaderFill: rgb(0x1C1D27),
+            baseSurface: baseSurface,
+            alternateRowFill: rgb(0x2A2A37),
+            raisedSurface: raisedSurface,
+            gridLine: rgb(0x292B39),
+            accent: mint,
+            secondaryAccent: pink,
+            primaryText: rgb(0xF8F8FC),
+            softText: rgb(0xDFDEE9),
+            mutedText: rgb(0xBCBCCD),
+            controlBorder: rgb(0x66677C),
+            panelBorder: rgb(0x414253),
+            panelInnerBorder: .clear,
+            liveBadgeAccent: rgb(0xFF809A),
+            liveIndicator: lime,
+            liveProgramMarker: lime,
+            warningAccent: rgb(0xFFD28B),
+            focusBorder: rgb(0xC9FFF0),
+            selectedBorder: violet,
+            screenBackground: LinearGradient(
+                colors: [brandSurface, rgb(0x131622), baseSurface],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            panelFill: vertical([rgb(0x252631), rgb(0x181924)]),
+            primaryActionFill: vertical([rgb(0x23483F), rgb(0x18352F)]),
+            focusedFill: LinearGradient(
+                colors: [rgb(0x2A4845), rgb(0x343249)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            secondaryActionFill: vertical([rgb(0x303144), raisedSurface]),
+            progressFill: LinearGradient(colors: [mint, violet, pink], startPoint: .leading, endPoint: .trailing),
+            selectedRowFill: AnyShapeStyle(rgb(0x2D2743)),
+            panelCornerRadius: 30,
+            controlCornerRadius: 20,
+            cellCornerRadius: 12,
+            panelBorderWidth: 1,
+            panelInnerBorderWidth: 0,
+            playerBorderWidth: 1,
+            playerBannerCornerRadius: 32,
+            showsAnimatedStatic: false,
+            statusCaptionFont: .system(size: 38, weight: .semibold, design: .rounded),
+            statusCaptionBackground: raisedSurface,
+            statusCaptionCornerRadius: 26,
+            bufferingBackground: raisedSurface.opacity(0.94),
+            bufferingCornerRadius: 24,
+            buttonFocusFill: rgb(0x2B453F),
+            buttonFocusBrightness: 0,
+            buttonFocusScale: 1.035,
+            buttonBorderWidth: 1,
+            showsTextShadow: false,
+            typography: .system(headingDesign: .rounded)
         )
     }()
 
     /// The order here is the order in the Theme Mode picker. Keep IDs stable for saved choices.
-    static let catalog: [Theme] = [.modern, .classic]
+    static let catalog: [Theme] = [.modern, .neon, .classic]
 
     static func resolve(_ id: String) -> Theme {
         catalog.first { $0.id == id } ?? modern
@@ -269,7 +342,10 @@ struct Theme: Identifiable {
     }
 
     func heading(_ size: CGFloat = 34) -> Font {
-        font(.compressed, size: size, weight: .bold)
+        switch typography {
+        case .weatherStar: return Self.weatherStarFont(.compressed, size: size)
+        case .system(let design): return .system(size: size, weight: .bold, design: design)
+        }
     }
 
     func channelName(_ size: CGFloat = 28) -> Font {

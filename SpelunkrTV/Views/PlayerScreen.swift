@@ -143,6 +143,7 @@ struct InfoBanner: View {
     var viewers: Int = 0
 
     var body: some View {
+        let floatsOverVideo = theme.playerBannerCornerRadius > 0
         let dialShape = RoundedRectangle(cornerRadius: theme.controlCornerRadius)
         let progressShape = RoundedRectangle(cornerRadius: min(5, theme.controlCornerRadius))
 
@@ -248,22 +249,39 @@ struct InfoBanner: View {
                 Spacer()
             }
             .foregroundStyle(theme.primaryText)
-            // tvOS title-safe margins
-            .padding(.horizontal, 80)
-            .padding(.top, 60)
+            .padding(.horizontal, floatsOverVideo ? 32 : 80)
+            .padding(.top, floatsOverVideo ? 28 : 60)
             .padding(.bottom, 30)
-            .background(
-                LinearGradient(
+            .background { bannerBackdrop(floating: floatsOverVideo) }
+            // Keep the floating card inside the tvOS title-safe area.
+            .padding(.horizontal, floatsOverVideo ? 80 : 0)
+            .padding(.top, floatsOverVideo ? 60 : 0)
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func bannerBackdrop(floating: Bool) -> some View {
+        if floating {
+            let shape = RoundedRectangle(cornerRadius: theme.playerBannerCornerRadius)
+            shape.fill(.regularMaterial)
+                .overlay {
+                    shape.fill(theme.brandSurface.opacity(0.9))
+                }
+                .overlay {
+                    shape.strokeBorder(theme.panelBorder, lineWidth: theme.playerBorderWidth)
+                }
+        } else {
+            Rectangle()
+                .fill(LinearGradient(
                     colors: [theme.brandSurface.opacity(0.96), theme.baseSurface.opacity(0.92)],
                     startPoint: .top,
                     endPoint: .bottom
-                ),
-                ignoresSafeAreaEdges: [.top, .horizontal]
-            )
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(theme.panelBorder).frame(height: theme.playerBorderWidth)
-            }
-            Spacer()
+                ))
+                .ignoresSafeArea(edges: [.top, .horizontal])
+                .overlay(alignment: .bottom) {
+                    Rectangle().fill(theme.panelBorder).frame(height: theme.playerBorderWidth)
+                }
         }
     }
 }
