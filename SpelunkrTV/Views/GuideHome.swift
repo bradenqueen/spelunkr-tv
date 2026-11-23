@@ -140,14 +140,11 @@ struct GuideHome: View {
             }
             .frame(width: 624, height: 408)
             .clipped()
-            // Inner shadow: a blurred dark stroke clipped to the video area.
             .overlay(
                 Rectangle()
-                    .stroke(Color.black.opacity(0.75), lineWidth: 14)
-                    .blur(radius: 7)
+                    .strokeBorder(Color.black.opacity(0.5), lineWidth: 4)
                     .allowsHitTesting(false)
             )
-            .clipped()
 
             // Control bar on the bottom of the frame: ▼  CH 401  ▲ ........ SPELUNKR.TV
             HStack(spacing: 14) {

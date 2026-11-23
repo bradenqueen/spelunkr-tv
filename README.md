@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/banner.png" alt="Spelunkr for Apple TV" width="100%">
+  <img src="docs/banner.png" alt="spelunkrtv-apple-tv" width="100%">
 </p>
 
-# Spelunkr for Apple TV
+# spelunkrtv-apple-tv
 
 **Cable TV, but weirder, on your Apple TV.** An unofficial tvOS app for [spelunkr.tv](https://spelunkr.tv), the free site that turns forgotten Internet Archive videos into 37 synchronized, 24/7 "cable" channels. Every channel lands on the same tape at the same second as the website.
 
@@ -12,7 +12,8 @@
 
 ## Features
 
-- All of spelunkr's channels, with a channel guide showing what is on now and what is next
+- A TV-sized channel guide with a live preview, a scrollable program grid, and details for upcoming shows
+- Live viewer counts for each channel and across the guide, shared with the website
 - Same schedule as the website: your TV and the browser show the same tape at the same moment
 - Live-TV channel surfing with the Siri Remote (up and down to change channels)
 - Bump and station-ID cards between shows, with spelunkr's music
@@ -34,14 +35,15 @@ flowchart LR
 - **Lineup and schedules:** the app loads `lineup.json` and a manifest per channel from `data.spelunkr.tv`, falling back to `spelunkr.tv/broadcast/` if that fails.
 - **Same schedule as the website:** the site's own schedule engine runs inside JavaScriptCore (Apple's built-in JS engine), so "what is on right now, and how far into it" is computed exactly the way the site does it.
 - **Playback:** AVPlayer opens the current show and seeks to the broadcast position. While it plays, the app checks once a second and quietly re-seeks if the picture drifts more than 3 seconds from the broadcast clock (at most once every 20 seconds). A "TRACKING..." label shows while the tape buffers.
-- **Video source:** Internet Archive download URLs (archive.org), streamed directly. Nothing is proxied or re-hosted.
+- **Video source:** The app streams Internet Archive tapes directly. When item metadata identifies a storage server, the app uses that direct URL for playback.
+- **Viewer counts:** the app reads the site's live viewer counts and reports the active channel using the site's heartbeat protocol.
 - **Bumps and station IDs:** between shows, cards (channel name, slides, SPELUNKR, "up next") appear with music from `audio.spelunkr.tv`, timed like the site's own cards.
 - **Overlay music:** on channels such as Vacation Slides, the tapes are silent and a playlist of public-domain tracks plays over them, plus a faint projector hum. The playlist is shuffled with the site's seeded generator, so you hear the same track at the same moment as everyone else. If a track will not play, the app moves to a stand-in like the site does.
 - **Picture fixes:** `AspectFixes.swift` loads the site's `stretch.json` and `zoom.json`. It also downloads `crop43.json`, which only matters for the site's optional CRT mode, so the app does not apply it.
 
 ## Requirements
 
-- A Mac with **Xcode 16 or newer** (the project uses Xcode 16's file-system-synchronized folders)
+- A Mac with **Xcode and the tvOS 27 SDK** for development and testing
 - **Node.js 18 or newer** (to generate the schedule engine, see below)
 - An Apple ID (a free one is fine)
 - The Apple TV simulator, or an Apple TV HD / Apple TV 4K on **tvOS 17 or later**
@@ -51,8 +53,8 @@ flowchart LR
 1. **Clone the repository.**
 
    ```sh
-   git clone https://github.com/bradenqueen/spelunkr-tv.git
-   cd spelunkr-tv
+   git clone https://github.com/bradenqueen/spelunkrtv-apple-tv.git
+   cd spelunkrtv-apple-tv
    ```
 
 2. **Generate the schedule engine.** Do this before building; without it the app builds but cannot tell what's on.
@@ -65,7 +67,15 @@ flowchart LR
 
    **Why is this a separate step?** That file contains code copied from spelunkr.tv's own bundle, which is not under a license that allows redistribution, so it is deliberately not committed to this repository. Generating it locally also means you always get the version that matches the live site.
 
-3. **Open the project in Xcode and run it.**
+3. **Fetch the guide fonts (optional).** Install a WOFF2 converter with `npm install --no-save wawoff2`, or install `fonttools` and `brotli` in your Python environment. Run the font script from the repository root.
+
+   ```sh
+   node tools/fetch-fonts.mjs
+   ```
+
+   The script writes the site's Star4000 and Star3000 fonts to the Git-ignored `SpelunkrTV/Fonts/` folder. The app uses system fonts when those files are absent.
+
+4. **Open the project in Xcode and run it.**
    1. Open `SpelunkrTV.xcodeproj`.
    2. Select the **SpelunkrTV** target, then **Signing & Capabilities**.
    3. Choose a **Team** (a free personal Apple ID team works). If Xcode says the bundle identifier is taken, change it to something unique (the project currently uses `net.zerph.spelunkrtv`).
@@ -89,8 +99,9 @@ If the app starts but says "The schedule engine is missing from the app", step 2
 ## Remote controls
 
 **Guide**
-- Swipe or use arrows to pick a channel (the guide shows what is on now and what is next)
-- Click to watch
+- Move up or down between channels and left or right through the schedule
+- Select a live program to watch it, or select an upcoming program to see its details
+- Press Up from the first grid row to reach WATCH and Down to return to the grid
 - Menu/Back: leave the app
 
 **Watching**
@@ -112,6 +123,10 @@ If the script reports a new engine number, also raise `supportedEngine` in `Spel
 
 The file ends in `.txt` so Xcode copies it as a plain resource instead of trying to compile it as source. The app reads it at runtime and hands it to JavaScriptCore.
 
+## Playback and focus logs
+
+Filter the Xcode console for the `tune` category in the `net.zerph.spelunkrtv` subsystem. Tune steps use the format `[channel +elapsedMs] step`. Instruments also records tune milestones as signposts. Enable debug messages to see `[focus]` entries for remote moves and guide focus changes.
+
 ## Project layout
 
 | Path | What it does |
@@ -121,22 +136,29 @@ The file ends in `.txt` so Xcode copies it as a plain resource instead of trying
 | `SpelunkrTV/BroadcastStore.swift` | Fetches lineup and manifests (with fallback), feeds the engine, keeps the guide fresh, holds app state |
 | `SpelunkrTV/ScheduleEngine.swift` | Runs the site's schedule engine in JavaScriptCore |
 | `SpelunkrTV/TVPlayer.swift` | Playback: tuning, seek to broadcast position, drift correction, card music, overlay music, projector hum, Internet Archive URLs |
+| `SpelunkrTV/TapeLoader.swift` | Fetches and caches MP4 metadata and streams media through HTTP byte ranges |
+| `SpelunkrTV/TapeWarmer.swift` | Prepares likely upcoming tapes and retains recently used ones for quicker tuning |
+| `SpelunkrTV/TuneLog.swift` | Tune timing logs, Instruments signposts, and guide focus debug messages |
 | `SpelunkrTV/AspectFixes.swift` | The site's stretch / zoom maps and the geometry that applies them |
-| `SpelunkrTV/Views/GuideView.swift` | Channel guide |
+| `SpelunkrTV/PresenceClient.swift` | Live viewer counts and active-channel heartbeats |
+| `SpelunkrTV/Theme.swift` | Guide colors, typography, and font registration |
+| `SpelunkrTV/Views/GuideHome.swift` | Guide preview, channel and program details, and Watch controls |
+| `SpelunkrTV/Views/GuideGrid.swift` | Time grid, program cells, and Siri Remote focus navigation |
 | `SpelunkrTV/Views/PlayerScreen.swift` | Full-screen playback, channel changing, info banner, video layer |
 | `SpelunkrTV/Views/BumpCardView.swift` | Bump and station-ID cards, and the static screen |
 | `SpelunkrTV/Engine/spelunkr-engine.js.txt` | The extracted site schedule engine (generated locally, not in git) |
+| `SpelunkrTV/Fonts/` | Optional guide fonts (generated locally, not in Git) |
 | `SpelunkrTV/Assets.xcassets` | App icon, Top Shelf images, accent color |
 | `tools/update-engine.mjs` | Downloads, extracts and tests the engine from the live site |
+| `tools/fetch-fonts.mjs` | Downloads the guide fonts and converts them from WOFF2 to TTF |
 | `tools/glue.js` | Glue code that exposes the engine to Swift (what is on now, the guide, overlay music); bundled into the generated engine file |
-| `docs/` | Images used by this README |
+| `docs/` | Project notes and README artwork |
 
 ## Known limitations
 
-- **Not yet built on real hardware** at the time of writing. The project was written without access to a Mac, so expect to fix a small build error or two on the first compile.
 - The app depends on spelunkr's **unofficial, undocumented data feeds**, which can change at any time.
 - Some old Internet Archive uploads use formats Apple TV cannot play. The app shows a card and waits for the next show.
-- The first tune can take a few seconds while archive.org starts streaming.
+- Cold tunes can take longer while the app loads a tape's MP4 metadata from the Internet Archive.
 - No on-screen playback controls: live TV cannot be paused or scrubbed.
 - No Chromecast or AirPlay controls.
 

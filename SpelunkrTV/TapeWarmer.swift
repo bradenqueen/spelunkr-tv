@@ -25,9 +25,14 @@ final class TapeWarmer {
         let dir: String
     }
 
+    struct Target {
+        let canonical: URL
+        let moov: Int?
+    }
+
     /// A warmed asset handed to the player. `ready` is true once its header has been parsed.
     struct Taken {
-        let asset: AVURLAsset
+        let tape: TapeLoader.Tape
         let ready: Bool
     }
 
@@ -36,7 +41,7 @@ final class TapeWarmer {
         let canonical: URL
         let created = Date()
         var startedMs: Double = Date.nowMs
-        var asset: AVURLAsset?
+        var tape: TapeLoader.Tape?
         var loaded = false
         var lastUsed = 0
         var task: Task<Void, Never>?
@@ -63,25 +68,25 @@ final class TapeWarmer {
             return nil
         }
         entry.watchdog?.cancel()
-        guard let asset = entry.asset, Date().timeIntervalSince(entry.created) < Self.staleAfter else {
+        guard let tape = entry.tape, Date().timeIntervalSince(entry.created) < Self.staleAfter else {
             TuneLog.info("[warmer] take dropped (no asset yet or stale): \(TuneLog.short(canonical))")
             // Still looking up the server (nothing to join) or too old: drop it.
             entry.task?.cancel()
-            entry.asset?.cancelLoading()
+            entry.tape?.asset.cancelLoading()
             return nil
         }
         // The warm task is left to finish by itself: it finds the entry gone and does nothing.
         TuneLog.info("[warmer] take hit: \(TuneLog.short(canonical)) loaded=\(entry.loaded) age=\(Int(Date().timeIntervalSince(entry.created)))s")
-        return Taken(asset: asset, ready: entry.loaded)
+        return Taken(tape: tape, ready: entry.loaded)
     }
 
     /// Takes back the parsed asset of a tape the player is leaving, so tuning straight back is a warm tune.
-    func keep(_ asset: AVURLAsset, canonical: URL) {
+    func keep(_ tape: TapeLoader.Tape, canonical: URL) {
         let key = canonical.absoluteString
         guard entries[key] == nil else { return }
         makeRoom()
         let entry = Entry(key: key, canonical: canonical)
-        entry.asset = asset
+        entry.tape = tape
         entry.loaded = true
         tick += 1
         entry.lastUsed = tick
@@ -207,21 +212,21 @@ final class TapeWarmer {
     /// Warms these addresses (most important first; at most `capacity`), and stops warming
     /// anything that is still loading and no longer wanted. Finished warms that are no longer
     /// wanted stay until the LRU needs the room.
-    func setWanted(_ urls: [URL]) {
-        let list = Array(urls.prefix(Self.capacity))
-        wanted = Set(list.map(\.absoluteString))
-        TuneLog.info("[warmer] wanted: \(list.map { TuneLog.short($0) }.joined(separator: ", "))")
+    func setWanted(_ targets: [Target]) {
+        let list = Array(targets.prefix(Self.capacity))
+        wanted = Set(list.map { $0.canonical.absoluteString })
+        TuneLog.info("[warmer] wanted: \(list.map { TuneLog.short($0.canonical) }.joined(separator: ", "))")
         for entry in Array(entries.values) where !wanted.contains(entry.key) && !entry.loaded {
             evict(entry)
         }
-        for url in list {
-            let key = url.absoluteString
+        for target in list {
+            let key = target.canonical.absoluteString
             if let existing = entries[key] {
                 tick += 1
                 existing.lastUsed = tick
                 continue
             }
-            start(url, key: key)
+            start(target, key: key)
         }
     }
 
@@ -242,14 +247,15 @@ final class TapeWarmer {
 
     // MARK: - Warming one tape
 
-    private func start(_ url: URL, key: String) {
+    private func start(_ target: Target, key: String) {
         makeRoom()
+        let url = target.canonical
         let entry = Entry(key: key, canonical: url)
         TuneLog.info("[warmer] start: \(TuneLog.short(url))")
         tick += 1
         entry.lastUsed = tick
         entries[key] = entry
-        entry.task = Task { [weak self] in await self?.warm(entry) }
+        entry.task = Task { [weak self] in await self?.warm(entry, moov: target.moov) }
         entry.watchdog = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.warmTimeout))
             guard !Task.isCancelled, let self else { return }
@@ -257,7 +263,7 @@ final class TapeWarmer {
         }
     }
 
-    private func warm(_ entry: Entry) async {
+    private func warm(_ entry: Entry, moov: Int?) async {
         guard let (id, file) = Self.parts(of: entry.canonical) else { evict(entry); return }
         var loadURL = entry.canonical
         let serverFound = await server(for: id)
@@ -267,12 +273,13 @@ final class TapeWarmer {
         TuneLog.info("[warmer] metadata lookup \(serverFound == nil ? "failed/none" : "ok") after \(Int(Date.nowMs - entry.startedMs))ms: \(TuneLog.short(entry.canonical))")
         guard !Task.isCancelled, entries[entry.key] === entry else { return }
 
-        let asset = AVURLAsset(url: loadURL)
-        entry.asset = asset
         let playable: Bool
         do {
+            let tape = try await TapeLoader.prepare(canonical: entry.canonical, url: loadURL, moov: moov)
+            guard !Task.isCancelled, entries[entry.key] === entry else { return }
+            entry.tape = tape
             // Parses the moov atom now, so a player item made from this asset is ready almost at once.
-            let loaded = try await asset.load(.isPlayable, .duration, .tracks)
+            let loaded = try await tape.asset.load(.isPlayable, .duration, .tracks)
             playable = loaded.0
         } catch {
             TuneLog.info("[warmer] header load failed after \(Int(Date.nowMs - entry.startedMs))ms: \(TuneLog.short(entry.canonical)) \(error.localizedDescription)")
@@ -293,7 +300,7 @@ final class TapeWarmer {
         }
         entry.task?.cancel()
         entry.watchdog?.cancel()
-        entry.asset?.cancelLoading()
+        entry.tape?.asset.cancelLoading()
     }
 
     /// Least recently used first, but anything no longer wanted goes before anything still wanted.

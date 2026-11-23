@@ -224,8 +224,7 @@ final class BroadcastStore {
             detailsInFlight.insert(key)
             defer { detailsInFlight.remove(key) }
             guard let url = URL(string: path, relativeTo: base),
-                  let text = try? await Self.fetchText(url.absoluteURL),
-                  let decoded = try? JSONDecoder().decode(DetailsFile.self, from: Data(text.utf8)) else {
+                  let decoded = try? await Self.fetchDetails(url.absoluteURL) else {
                 continue
             }
             detailsCache[key] = decoded.items
@@ -234,6 +233,11 @@ final class BroadcastStore {
     }
 
     // MARK: - Networking
+
+    private nonisolated static func fetchDetails(_ url: URL) async throws -> DetailsFile {
+        let text = try await fetchText(url)
+        return try JSONDecoder().decode(DetailsFile.self, from: Data(text.utf8))
+    }
 
     nonisolated static func fetchLineup() async throws -> (Lineup, URL) {
         var lastError: Error = URLError(.cannotLoadFromNetwork)

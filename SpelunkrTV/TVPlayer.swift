@@ -42,6 +42,7 @@ final class TVPlayer {
     @ObservationIgnored private var warmTask: Task<Void, Never>?
     @ObservationIgnored private var warmLeadTask: Task<Void, Never>?
     @ObservationIgnored private var tapeURL: URL?
+    @ObservationIgnored private var currentTape: TapeLoader.Tape?
     @ObservationIgnored private var overlayTask: Task<Void, Never>?
     @ObservationIgnored private var overlayBoundaryTask: Task<Void, Never>?
     @ObservationIgnored private var overlayCue: OverlayCue?
@@ -67,8 +68,8 @@ final class TVPlayer {
     func tune(_ ch: ChannelInfo) {
         // Leaving a tape that is playing: keep its parsed asset, so coming straight back is a warm tune.
         if let old = channel, old.id != ch.id, case .playing = phase, let url = tapeURL,
-           let asset = video.currentItem?.asset as? AVURLAsset {
-            warmer.keep(asset, canonical: url)
+           let currentTape {
+            warmer.keep(currentTape, canonical: url)
         }
         endTuneSignpost()
         tuneStartMs = Date.nowMs
@@ -200,44 +201,41 @@ final class TVPlayer {
         }
         guard !Task.isCancelled else { return }
 
-        // Use a warmed asset if there is one (its header is already parsed). Otherwise load the direct
-        // storage address: cached, or looked up right now (two tiny requests, 1.5 s at most), because the
-        // archive.org/download address answers every range request with a 302 and a cold header load
-        // through it takes ~25 s. Only if that lookup fails does it load archive.org/download.
-        // `url` stays the canonical address: it is what the picture-fix lookup is keyed on.
+        // Keep the canonical URL for caching and picture fixes; only the loader uses the storage URL.
         let warmed = warmer.take(url)
-        // A cold load must not compete with speculative warms for bandwidth. A warm hit has the
-        // header already, so the neighbours' warms carry on (the next channel change may need them).
         if warmed == nil { warmer.cancelPending() }
-        var asset: AVURLAsset
+        var tape: TapeLoader.Tape
         var source: String
-        var usedDirect: Bool
         if let warmed {
-            asset = warmed.asset
-            usedDirect = asset.url != url
-            source = usedDirect ? "warmed asset" : "warmed asset (redirect)"
+            tape = warmed.tape
+            source = "warmed asset"
         } else {
             let resolved = await warmer.resolveDirectURL(for: url, timeout: 1.5)
             guard !Task.isCancelled, channel?.id == ch.id else { return }
-            asset = AVURLAsset(url: resolved.url ?? url)
-            usedDirect = resolved.source.isDirect
+            tlog("preparing tape [\(resolved.source.description)]; \(TuneLog.short(url)); moov \(item.moov.map { "\($0)" } ?? "?")")
+            guard let prepared = try? await TapeLoader.prepare(canonical: url, url: resolved.url ?? url, moov: item.moov),
+                  !Task.isCancelled, channel?.id == ch.id else { return }
+            tape = prepared
             source = resolved.source.description
         }
+        var usedDirect = tape.url != url
+        source += tape.usesRanges ? ", range loader" : ", AVFoundation"
         let wasWarm = warmed?.ready ?? false
         tlog("\(warmed == nil ? "warm miss" : (wasWarm ? "warm hit, header ready" : "warm hit, header still loading")); direct URL \(usedDirect ? "yes" : "no") [\(source)]; \(TuneLog.short(url)); moov \(item.moov.map { "\($0)" } ?? "?"), offset \(Int(item.expectedPosition(atMs: Date.nowMs)))s")
 
-        var playerItem = AVPlayerItem(asset: asset)
+        var playerItem = AVPlayerItem(asset: tape.asset)
         var createdMs = Date.nowMs
         var ready = false
         // A lenient tolerance lets the positioning seek land on a nearby keyframe instead of decoding
         // from the previous one; the fine sync below corrects anything over a second.
         let tolerance = CMTime(seconds: 0.75, preferredTimescale: 600)
         for attempt in 0..<2 {
-            if attempt > 0 { playerItem = AVPlayerItem(asset: asset) }
+            if attempt > 0 { playerItem = AVPlayerItem(asset: tape.asset) }
             playerItem.preferredForwardBufferDuration = 8
             phase = .tuning
             clearPicture()
             tapeURL = url
+            currentTape = tape
             video.isMuted = true   // nothing is heard until the picture is shown
             video.replaceCurrentItem(with: playerItem)
             video.volume = tapeVolume
@@ -246,18 +244,17 @@ final class TVPlayer {
 
             // No seek yet: before the item is ready AVFoundation completes a seek at once without
             // moving anything, so the position is set right after readyToPlay below.
-            // A direct address that is not answering is given up on quickly (the canonical address
-            // reaches the same storage through archive.org's redirect, which has its own fallbacks).
-            ready = await waitUntilReady(playerItem, timeout: usedDirect ? 8 : 25)
+            // The range loader has already fetched the moov. Native loading needs more time for it.
+            ready = await waitUntilReady(playerItem, timeout: tape.usesRanges ? 12 : 45)
             guard !Task.isCancelled else { return }
             tlog("item status \(Self.describe(playerItem.status)) (header \(Int(Date.nowMs - createdMs))ms after item created, \(usedDirect ? "direct" : "redirect") [\(source)])")
-            if ready || !usedDirect { break }
-            // The direct storage address didn't work: go back to archive.org/download for this item.
+            if ready || !tape.usesRanges && !usedDirect { break }
             playerItem.cancelPendingSeeks()
-            warmer.forgetServer(for: url)
-            asset = AVURLAsset(url: url)
+            if tape.usesRanges { TapeLoader.discardHeader(for: url) }
+            if usedDirect { warmer.forgetServer(for: url) }
+            tape = TapeLoader.nativeTape(url: url)
             usedDirect = false
-            source = "fallback to redirect (direct load failed)"
+            source = "fallback to canonical URL, AVFoundation"
         }
         guard ready else {
             silenceTape()
@@ -365,17 +362,15 @@ final class TVPlayer {
         }
         guard stillCurrent() else { return }
 
-        var urls: [URL] = []
-        for t in targets {
-            // With a direct address even a 20 to 30 MB moov parses in a few seconds, so it is worth warming;
-            // only the very largest headers would compete with the tape being watched.
-            if let moov = t.moov, moov > TapeWarmer.maxWarmMoov { continue }
-            guard let id = t.id, let url = ArchiveMedia.canonicalURL(id: id, file: t.file),
-                  url != tapeURL, !urls.contains(url) else { continue }
-            urls.append(url)
+        var warmTargets: [TapeWarmer.Target] = []
+        for target in targets {
+            if let moov = target.moov, moov > TapeWarmer.maxWarmMoov { continue }
+            guard let id = target.id, let url = ArchiveMedia.canonicalURL(id: id, file: target.file),
+                  url != tapeURL, !warmTargets.contains(where: { $0.canonical == url }) else { continue }
+            warmTargets.append(.init(canonical: url, moov: target.moov))
         }
-        TuneLog.info("[\(ch.id)] updateWarms: \(targets.count) candidates, \(urls.count) to warm, engine lookups took \(Int(Date.nowMs - began))ms")
-        warmer.setWanted(urls)
+        TuneLog.info("[\(ch.id)] updateWarms: \(targets.count) candidates, \(warmTargets.count) to warm, engine lookups took \(Int(Date.nowMs - began))ms")
+        warmer.setWanted(warmTargets)
     }
 
     /// The first tape that starts at or after `ms` on a channel, skipping cards and station breaks.
@@ -448,6 +443,7 @@ final class TVPlayer {
     }
 
     private func clearPicture() {
+        currentTape = nil
         tapeURL = nil
         if !correction.isNone { correction = .none }
         if videoSize != .zero { videoSize = .zero }
@@ -476,10 +472,19 @@ final class TVPlayer {
     /// Waits (by observing `status`, no polling) until the item is ready or has failed, or the timeout passes.
     private func waitUntilReady(_ item: AVPlayerItem, timeout: Double) async -> Bool {
         if item.status == .unknown {
-            let statuses = item.publisher(for: \.status)
+            let (updates, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            // Register before racing the timeout and buffer any transition before iteration starts.
+            let observation = item.observe(\.status, options: [.initial, .new]) { item, _ in
+                if item.status != .unknown { continuation.yield(()) }
+            }
+            defer {
+                observation.invalidate()
+                continuation.finish()
+            }
             await withTaskGroup(of: Void.self) { group in
                 group.addTask {
-                    for await status in statuses.values where status != .unknown { return }
+                    var iterator = updates.makeAsyncIterator()
+                    _ = await iterator.next()
                 }
                 group.addTask { try? await Task.sleep(for: .seconds(timeout)) }
                 _ = await group.next()
