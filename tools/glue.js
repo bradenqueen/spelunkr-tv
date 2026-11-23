@@ -2,6 +2,12 @@
 // ---- Spelunkr TV glue (written for the Apple TV app, not part of spelunkr.tv) ----
 // SPK_RB / SPK_ZO / SPK_FN are set by update-engine.mjs to the site's own
 // "new channel", "add version" and "what's on at time t" functions.
+function spkPresenceConfig() {
+  return JSON.stringify({
+    url: typeof SPK_SB_URL === "string" ? SPK_SB_URL : null,
+    key: typeof SPK_SB_KEY === "string" ? SPK_SB_KEY : null
+  });
+}
 function spkBuildVersion(manifest, platform, meta) {
   var r = manifest.bumps || [], s = (platform && platform.bumps) || [];
   return {
@@ -41,7 +47,8 @@ function spkNextVideo(ch, fromMs) {
   var t = fromMs;
   for (var i = 0; i < 60; i++) {
     var r = SPK_FN(ch, t);
-    if (r.item.type === "video") return { title: r.item.title || r.item.id, year: r.item.year || null, startMs: r.startMs };
+    if (r.item.type === "video") return { title: r.item.displayTitle || r.item.title || r.item.id, year: r.item.year || null, startMs: r.startMs };
+    if (r.endMs <= t) break;
     t = r.endMs;
   }
   return null;
@@ -58,13 +65,16 @@ function spkNow(channelId, nowMs) {
     seekBase: spkSeekBase(it), next: spkNextVideo(ch, r.endMs)
   };
   if (it.type === "video") {
-    out.id = it.id; out.file = it.file || it.mp4 || null; out.title = it.title || it.id;
+    out.id = it.id; out.file = it.file || it.mp4 || null; out.title = it.displayTitle || it.title || it.id;
     out.year = it.year || null; out.duration = it.duration;
+    if (Number.isInteger(it.videoIndex)) out.videoIndex = it.videoIndex;
+    if (Number.isFinite(it.moov)) out.moov = it.moov;
     if (it.ambient != null) out.ambient = it.ambient;
   } else if (it.type === "ad") {
     out.id = (it.slice && it.slice.tape) || null; out.file = (it.slice && it.slice.file) || null;
     out.title = "Commercial break";
     if (it.slice && Number.isFinite(Number(it.slice.gainDb))) out.gainDb = Number(it.slice.gainDb);
+    if (it.slice && Number.isFinite(it.slice.moov)) out.moov = it.slice.moov;
   } else {
     var text = function (b) { return b && b.slides ? b.slides.map(function (x) { return x.text; }) : []; };
     out.channelSlides = text(it.channelBump);
@@ -82,10 +92,207 @@ function spkUpcoming(channelId, nowMs, n) {
   var out = [], t = nowMs;
   for (var i = 0; i < 400 && out.length < n; i++) {
     var r = SPK_FN(ch, t);
-    if (r.item.type === "video") out.push({ title: r.item.title || r.item.id, year: r.item.year || null, startMs: r.startMs, endMs: r.endMs });
+    if (r.item.type === "video") {
+      out.push({
+        title: r.item.displayTitle || r.item.title || r.item.id,
+        year: r.item.year || null,
+        startMs: r.startMs,
+        endMs: r.endMs,
+        videoIndex: Number.isInteger(r.item.videoIndex) ? r.item.videoIndex : null,
+        version: r.version
+      });
+    }
+    if (r.endMs <= t) break;
     t = r.endMs;
   }
   return JSON.stringify(out);
+}
+
+// ---- Time-grid schedule and marathon block grouping (ported from spelunkr.tv) ----
+var SPK_SHORT_THRESHOLD_S = 900; // 15 minutes
+
+function spkVersionByNumber(ch, v) {
+  for (var i = 0; i < ch.versions.length; i++) {
+    if (ch.versions[i].v === v) return ch.versions[i];
+  }
+  return null;
+}
+
+function spkVideoRecord(r) {
+  var it = r.item;
+  var dur = Number.isFinite(it.duration) && it.duration > 0 ? it.duration : Math.max(0, (r.endMs - r.startMs) / 1000);
+  return {
+    title: it.displayTitle || it.title || it.id,
+    year: it.year || null,
+    startMs: r.startMs,
+    endMs: r.endMs,
+    durationS: dur,
+    videoIndex: Number.isInteger(it.videoIndex) ? it.videoIndex : null,
+    version: r.version,
+    show: it.show || null
+  };
+}
+
+// All video entries overlapping [fromMs, toMs], skipping bump-breaks, ads, and up-next cards.
+function spkRange(channelId, fromMs, toMs) {
+  var ch = spkChannels[channelId];
+  if (!ch || !ch.versions.length || toMs <= fromMs) return "[]";
+  var out = [], t = fromMs;
+  for (var i = 0; i < 2000 && t < toMs; i++) {
+    var r = SPK_FN(ch, t);
+    if (r.item.type === "video") out.push(spkVideoRecord(r));
+    if (r.endMs <= t) break;
+    t = r.endMs;
+  }
+  return JSON.stringify(out);
+}
+
+function spkShortShowsSet(items) {
+  var counts = {};
+  if (!Array.isArray(items)) return counts;
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    if (!it || !it.show) continue;
+    var c = counts[it.show] || (counts[it.show] = { short: 0, all: 0 });
+    c.all++;
+    if (it.duration < SPK_SHORT_THRESHOLD_S) c.short++;
+  }
+  var result = {};
+  for (var k in counts) {
+    if (counts[k].short * 2 > counts[k].all) result[k] = true;
+  }
+  return result;
+}
+
+function spkGroupBlocks(containers, fromMs, toMs, shortShows) {
+  var cells = [];
+  for (var ci = 0; ci < containers.length; ci++) {
+    var entries = containers[ci];
+    var runs = [];
+    for (var ei = 0; ei < entries.length; ei++) {
+      var e = entries[ei];
+      var kind = (e.show && shortShows[e.show]) ? ("sitting:" + e.show) : (e.durationS < SPK_SHORT_THRESHOLD_S ? "short" : null);
+      var prev = runs.length ? runs[runs.length - 1] : null;
+      if (kind && prev && prev.of === kind) prev.entries.push(e);
+      else runs.push({ of: kind, entries: [e] });
+    }
+    var merged = [];
+    for (var ri = 0; ri < runs.length; ri++) {
+      var run = runs[ri];
+      if (run.of && run.of !== "short" && run.entries.length === 1 && run.entries[0].durationS < SPK_SHORT_THRESHOLD_S) {
+        run.of = "short";
+      }
+      var last = merged.length ? merged[merged.length - 1] : null;
+      if (run.of === "short" && last && last.of === "short") {
+        for (var j = 0; j < run.entries.length; j++) last.entries.push(run.entries[j]);
+      } else {
+        merged.push(run);
+      }
+    }
+    for (var mi = 0; mi < merged.length; mi++) {
+      var list = merged[mi].entries;
+      if (!list.length) continue;
+      var first = list[0], endEntry = list[list.length - 1];
+      var startMs = first.startMs, endMs = endEntry.endMs;
+      if (endMs <= fromMs || startMs >= toMs) continue;
+      if (list.length === 1) {
+        cells.push({
+          title: first.title,
+          year: first.year,
+          startMs: startMs,
+          endMs: endMs,
+          durationS: first.durationS,
+          videoIndex: first.videoIndex,
+          version: first.version,
+          isMarathon: false,
+          series: null,
+          showCount: 1,
+          shows: []
+        });
+      } else {
+        var firstShow = first.show;
+        var sameSeries = !!firstShow;
+        for (var si = 1; si < list.length && sameSeries; si++) {
+          if (list[si].show !== firstShow) sameSeries = false;
+        }
+        cells.push({
+          title: sameSeries ? firstShow : first.title,
+          year: null,
+          startMs: startMs,
+          endMs: endMs,
+          durationS: Math.max(0, (endMs - startMs) / 1000),
+          videoIndex: first.videoIndex,
+          version: first.version,
+          isMarathon: true,
+          series: sameSeries ? firstShow : null,
+          showCount: list.length,
+          shows: list.map(function (s) {
+            return {
+              title: s.title,
+              year: s.year,
+              startMs: s.startMs,
+              endMs: s.endMs,
+              durationS: s.durationS,
+              videoIndex: s.videoIndex,
+              version: s.version
+            };
+          })
+        });
+      }
+    }
+  }
+  return cells;
+}
+
+// Grid cells (with marathon block grouping) overlapping [fromMs, toMs], matching spelunkr.tv's guide.
+function spkBlocks(channelId, fromMs, toMs) {
+  var ch = spkChannels[channelId];
+  if (!ch || !ch.versions.length || toMs <= fromMs) return "[]";
+  var r0 = SPK_FN(ch, fromMs);
+  var ver0 = spkVersionByNumber(ch, r0.version);
+  var shortShows = spkShortShowsSet(ver0 ? ver0.items : null);
+
+  if (ver0 && ver0.block) {
+    // Marathon-block channel: walk back to the start of the current block (after a bump-break).
+    var cursor = r0.item.type === "bump-break" ? r0.endMs : r0.startMs;
+    for (var b = 0; b < 1000; b++) {
+      var cur = SPK_FN(ch, cursor);
+      var prev = SPK_FN(ch, cursor - 1);
+      if (prev.item.type === "bump-break" || prev.version !== cur.version || prev.startMs >= cursor) break;
+      cursor = prev.startMs;
+    }
+    var containers = [];
+    var active = null;
+    var activeVersion = null;
+    var t = cursor;
+    for (var step = 0; step < 3000; step++) {
+      var r = SPK_FN(ch, t);
+      if (active && (r.item.type === "bump-break" || r.version !== activeVersion)) {
+        containers.push(active);
+        active = null;
+        activeVersion = null;
+      }
+      if (!active && r.startMs >= toMs) break;
+      if (r.item.type === "video") {
+        if (!active) { active = []; activeVersion = r.version; }
+        active.push(spkVideoRecord(r));
+      }
+      if (r.endMs <= t) break;
+      t = r.endMs;
+    }
+    if (active && active.length) containers.push(active);
+    return JSON.stringify(spkGroupBlocks(containers, fromMs, toMs, shortShows));
+  }
+
+  // Regular channel: collect videos in [fromMs, toMs] and group short/sitting runs.
+  var entries = [], t2 = fromMs;
+  for (var k = 0; k < 2000 && t2 < toMs; k++) {
+    var rk = SPK_FN(ch, t2);
+    if (rk.item.type === "video") entries.push(spkVideoRecord(rk));
+    if (rk.endMs <= t2) break;
+    t2 = rk.endMs;
+  }
+  return JSON.stringify(spkGroupBlocks([entries], fromMs, toMs, shortShows));
 }
 
 // ---- Overlay music (channels with audioOverlay: true, e.g. VACATION SLIDES) ----

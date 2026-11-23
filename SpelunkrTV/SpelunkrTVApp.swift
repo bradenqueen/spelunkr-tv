@@ -4,8 +4,10 @@ import SwiftUI
 @main
 struct SpelunkrTVApp: App {
     @State private var store = BroadcastStore()
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        Theme.registerFonts()
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     }
 
@@ -14,14 +16,27 @@ struct SpelunkrTVApp: App {
             RootView()
                 .environment(store)
                 .preferredColorScheme(.dark)
+                .onChange(of: scenePhase) { _, phase in
+                    switch phase {
+                    case .active:
+                        store.presence.connect()
+                        if let id = store.tv.channel?.id {
+                            store.presence.track(channelID: id)
+                        }
+                    case .background:
+                        store.presence.disconnect()
+                    default:
+                        break
+                    }
+                }
         }
     }
 }
 
 struct RootView: View {
     @Environment(BroadcastStore.self) private var store
-    @State private var watching: ChannelInfo?
-    @State private var lastChannelID: String?
+    @State private var selectedChannel: ChannelInfo?
+    @State private var isFullScreen = false
 
     var body: some View {
         ZStack {
@@ -32,16 +47,22 @@ struct RootView: View {
                 default:
                     StaticView(caption: "ADJUSTING THE ANTENNA…")
                 }
-            } else if watching != nil {
+            } else if isFullScreen {
                 PlayerScreen(tv: store.tv) {
-                    lastChannelID = store.tv.channel?.id ?? watching?.id
-                    store.tv.stop()
-                    watching = nil
+                    // Return to the guide with the same channel playing (no re-tune).
+                    if let current = store.tv.channel {
+                        selectedChannel = current
+                    }
+                    isFullScreen = false
                 }
             } else {
-                GuideView(initialFocus: lastChannelID) { channel in
-                    watching = channel
-                    store.tv.tune(channel)
+                GuideHome(selectedChannel: $selectedChannel) { channel in
+                    selectedChannel = channel
+                    if store.tv.channel?.id != channel.id {
+                        store.tv.tune(channel)
+                    }
+                    store.presence.track(channelID: channel.id)
+                    isFullScreen = true
                 }
             }
         }

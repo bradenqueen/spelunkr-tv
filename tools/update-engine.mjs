@@ -31,7 +31,6 @@ function matchBrace(src, open) {
       if (s[j] === "\\") { j++; continue; }
       if (s[j] === "`") { depth = st.pop(); return j; }
       if (s[j] === "$" && s[j + 1] === "{") {
-        // scan the ${ ... } expression
         let d = 1; j += 2;
         for (; j < s.length && d > 0; j++) {
           const ch = s[j];
@@ -66,9 +65,14 @@ const ZO = (js.slice(js.lastIndexOf("function ", zoAt)).match(/^function (\w+)\(
 const body = js.slice(start, end + 1);
 for (const name of [FN, RB, ZO]) if (!new RegExp(`function ${name}\\(`).test(body)) fail(`${name} is outside the extracted engine`);
 
+// Extract public Supabase URL and anon key for viewer counts/heartbeats (kept out of git).
+const sbMatch = js.match(/const \w+="(https:\/\/[a-z0-9-]+\.supabase\.co)"\.trim\(\),\w+="([^"]+)"\.trim\(\)/);
+const sbURL = sbMatch ? sbMatch[1] : null;
+const sbKey = sbMatch ? sbMatch[2] : null;
+
 const glue = readFileSync(join(here, "glue.js"), "utf8");
 const header = `// spelunkr.tv schedule engine, extracted from ${asset} on ${new Date().toISOString()}\n// by tools/update-engine.mjs. Do not edit by hand.\n`;
-const engine = `${header}${body}\nvar SPK_RB=${RB},SPK_ZO=${ZO},SPK_FN=${FN};\n${glue}`;
+const engine = `${header}${body}\nvar SPK_RB=${RB},SPK_ZO=${ZO},SPK_FN=${FN},SPK_SB_URL=${JSON.stringify(sbURL)},SPK_SB_KEY=${JSON.stringify(sbKey)};\n${glue}`;
 
 // Smoke test against the live lineup before writing anything.
 const ctx = { console: { log() {}, warn() {}, error() {} } };
@@ -78,6 +82,7 @@ const base = "https://spelunkr.tv/broadcast/";
 const lineup = JSON.parse(await text(base + "lineup.json"));
 const platforms = {};
 let ok = 0;
+const nowMs = Date.now();
 for (const ch of lineup.channels.slice(0, 6)) {
   for (const v of ch.versions) {
     const m = await text(base + v.manifest);
@@ -85,8 +90,10 @@ for (const ch of lineup.channels.slice(0, 6)) {
     if (p && !platforms[p]) platforms[p] = await text(base + p);
     ctx.spkAddVersion(ch.id, m, p ? platforms[p] : null, JSON.stringify({ v: v.v, epochMs: v.epochMs, effectiveAtMs: v.effectiveAtMs, startIndex: v.startIndex }));
   }
-  const now = JSON.parse(ctx.spkNow(ch.id, Date.now()));
-  console.log(`  ${String(ch.dial).padStart(3)} ${ch.name.padEnd(22)} ${now.type.padEnd(10)} ${now.title || ""}`);
+  const now = JSON.parse(ctx.spkNow(ch.id, nowMs));
+  const blocks = JSON.parse(ctx.spkBlocks(ch.id, nowMs, nowMs + 3 * 3600 * 1000));
+  if (!blocks.length) fail(`${ch.id}: spkBlocks returned empty 3h window`);
+  console.log(`  ${String(ch.dial).padStart(3)} ${ch.name.padEnd(22)} ${now.type.padEnd(10)} ${String(blocks.length).padStart(2)} cells  ${now.title || ""}`);
   ok++;
 }
 if (!ok) fail("smoke test found no channels");
@@ -109,7 +116,7 @@ for (const ch of lineup.channels.filter((c) => c.audioOverlay && !c.debugOnly)) 
   for (let i = 0; i < 40; i++) {
     const t = t0 + i * 37 * 60 * 1000 + 13_000;
     const cue = JSON.parse(ctx.spkOverlay(ch.id, t) || "null");
-    if (!cue) continue; // a card or ad was on air
+    if (!cue) continue;
     cues++;
     if (!cue.track || !cue.track.url) fail(`${ch.id}: overlay has no playable track at ${new Date(t).toISOString()}`);
     if (WB) {
@@ -129,4 +136,4 @@ for (const ch of lineup.channels.filter((c) => c.audioOverlay && !c.debugOnly)) 
 }
 mkdirSync(dirname(OUT), { recursive: true });
 writeFileSync(OUT, engine);
-console.log(`wrote ${OUT} (${(engine.length / 1024).toFixed(0)} KB; engine ${lineup.engine})`);
+console.log(`wrote ${OUT} (${(engine.length / 1024).toFixed(0)} KB; engine ${lineup.engine}; presence ${sbURL ? "ok" : "missing"})`);

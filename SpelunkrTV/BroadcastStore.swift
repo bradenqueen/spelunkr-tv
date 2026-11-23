@@ -25,12 +25,20 @@ final class BroadcastStore {
     private(set) var guide: [String: [GuideEntry]] = [:]
     private(set) var audioBase = URL(string: "https://audio.spelunkr.tv/bumps/")!
     private(set) var engineWarning: String?
+    private(set) var detailsRevision: Int = 0
+    private(set) var scheduleRevision: Int = 0
 
     let engine: ScheduleEngine?
     let tv: TVPlayer
+    let presence = PresenceClient()
     /// Per-tape picture corrections (stretch / zoom) from spelunkr.tv.
     let aspectFixes = AspectFixes()
+
+    @ObservationIgnored private var dataBase: URL = sources[0]
     @ObservationIgnored private var platformCache: [String: String] = [:]
+    @ObservationIgnored private var detailsCache: [String: [ShowDetail?]] = [:]
+    @ObservationIgnored private var detailsInFlight: Set<String> = []
+    @ObservationIgnored private var blocksCache: [String: [GuideBlock]] = [:]
     @ObservationIgnored private var started = false
 
     init() {
@@ -44,6 +52,12 @@ final class BroadcastStore {
     func start() {
         guard !started else { return }
         started = true
+        Task {
+            if let cfg = await engine?.presenceConfig() {
+                presence.configure(urlString: cfg.url, key: cfg.key)
+            }
+            presence.connect()
+        }
         Task { await aspectFixes.load() }
         Task { await refreshLoop() }
         Task { await guideLoop() }
@@ -71,6 +85,7 @@ final class BroadcastStore {
         }
         do {
             let (lineup, base) = try await Self.fetchLineup()
+            dataBase = base
             if let a = lineup.audioBase, let u = URL(string: a) { audioBase = ArchiveMedia.secure(u) }
             if let e = lineup.engine, e > Self.supportedEngine {
                 engineWarning = "Spelunkr changed its schedule format (engine \(e)). Run tools/update-engine.mjs and rebuild, or some channels may drift."
@@ -130,6 +145,10 @@ final class BroadcastStore {
                 if onAir != nil { ready.append(ch) }
             }
             channels = ready
+            if !manifests.isEmpty {
+                blocksCache.removeAll()
+                scheduleRevision += 1
+            }
             status = ready.isEmpty ? .failed("No channels could be loaded.") : .ready
             await refreshGuide()
         } catch {
@@ -145,9 +164,53 @@ final class BroadcastStore {
         let now = Date.nowMs
         var g: [String: [GuideEntry]] = [:]
         for ch in channels {
-            g[ch.id] = await engine.upcoming(channel: ch.id, atMs: now, count: 3)
+            g[ch.id] = await engine.upcoming(channel: ch.id, atMs: now, count: 4)
         }
         guide = g
+    }
+
+    // MARK: - Grid windows & channel schedules (cached per window)
+
+    func blocks(for channelID: String, fromMs: Double, toMs: Double) async -> [GuideBlock] {
+        let key = "\(channelID)|\(Int64(fromMs))|\(Int64(toMs))"
+        if let cached = blocksCache[key] { return cached }
+        guard let engine else { return [] }
+        let computed = await engine.blocks(channel: channelID, fromMs: fromMs, toMs: toMs)
+        if blocksCache.count > 240 { blocksCache.removeAll() }
+        blocksCache[key] = computed
+        return computed
+    }
+
+    func programs(for channelID: String, fromMs: Double, toMs: Double) async -> [GuideProgram] {
+        guard let engine else { return [] }
+        return await engine.range(channel: channelID, fromMs: fromMs, toMs: toMs)
+    }
+
+    // MARK: - Show details (blurbs)
+
+    func detail(channelID: String, version: Int?, videoIndex: Int?) -> ShowDetail? {
+        guard let version, let videoIndex, videoIndex >= 0 else { return nil }
+        let key = "\(channelID)-v\(version)"
+        guard let items = detailsCache[key], videoIndex < items.count else { return nil }
+        return items[videoIndex]
+    }
+
+    func ensureDetails(for channel: ChannelInfo) async {
+        let base = dataBase
+        for ptr in channel.versions {
+            guard let path = ptr.details, !path.isEmpty else { continue }
+            let key = "\(channel.id)-v\(ptr.v)"
+            guard detailsCache[key] == nil, !detailsInFlight.contains(key) else { continue }
+            detailsInFlight.insert(key)
+            defer { detailsInFlight.remove(key) }
+            guard let url = URL(string: path, relativeTo: base),
+                  let text = try? await Self.fetchText(url.absoluteURL),
+                  let decoded = try? JSONDecoder().decode(DetailsFile.self, from: Data(text.utf8)) else {
+                continue
+            }
+            detailsCache[key] = decoded.items
+            detailsRevision += 1
+        }
     }
 
     // MARK: - Networking
