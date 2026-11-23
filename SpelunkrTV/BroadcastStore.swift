@@ -121,19 +121,26 @@ final class BroadcastStore {
             }
 
             // Each manifest points at a shared "platform" file of spelunkr-wide bumpers.
+            var attemptedPlatforms = Set<String>()
             for (_, _, text) in manifests {
                 guard let path = (try? JSONDecoder().decode(ManifestHead.self, from: Data(text.utf8)))?.platform,
                       platformCache[path] == nil,
-                      let url = URL(string: path, relativeTo: base) else { continue }
-                platformCache[path] = try? await Self.fetchText(url.absoluteURL)
+                      attemptedPlatforms.insert(path).inserted,
+                      let url = URL(string: path, relativeTo: base),
+                      let platform = try? await Self.fetchText(url.absoluteURL),
+                      (try? JSONSerialization.jsonObject(with: Data(platform.utf8))) is [String: Any] else { continue }
+                platformCache[path] = platform
             }
 
+            var addedVersion = false
             for (channel, pointer, text) in manifests.sorted(by: { $0.1.v < $1.1.v }) {
                 let path = (try? JSONDecoder().decode(ManifestHead.self, from: Data(text.utf8)))?.platform
+                if let path, platformCache[path] == nil { continue }
                 do {
                     try await engine.addVersion(channel: channel, manifest: text,
                                                 platform: path.flatMap { platformCache[$0] },
                                                 pointer: pointer)
+                    addedVersion = true
                 } catch {
                     print("[store] \(channel) v\(pointer.v): \(error.localizedDescription)")
                 }
@@ -145,7 +152,7 @@ final class BroadcastStore {
                 if onAir != nil { ready.append(ch) }
             }
             channels = ready
-            if !manifests.isEmpty {
+            if addedVersion {
                 blocksCache.removeAll()
                 scheduleRevision += 1
             }

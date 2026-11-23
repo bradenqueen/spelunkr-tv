@@ -57,6 +57,7 @@ struct RootView: View {
                 }
             } else {
                 GuideHome(selectedChannel: $selectedChannel) { channel in
+                    guard let channel = store.channels.first(where: { $0.id == channel.id }), channel.isWatchable else { return }
                     selectedChannel = channel
                     if store.tv.channel?.id != channel.id {
                         store.tv.tune(channel)

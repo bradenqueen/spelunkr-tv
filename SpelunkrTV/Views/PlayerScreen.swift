@@ -66,6 +66,7 @@ struct PlayerScreen: View {
         .focusEffectDisabled()
         .focused($focused)
         .onAppear {
+            tv.setFullscreen(true)
             focused = true
             flashInfo()
             UIApplication.shared.isIdleTimerDisabled = true
@@ -76,7 +77,7 @@ struct PlayerScreen: View {
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
-            DisplayMatching.reset()
+            tv.setFullscreen(false)
         }
         .onMoveCommand { direction in
             switch direction {

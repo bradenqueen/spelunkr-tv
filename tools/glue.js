@@ -248,51 +248,60 @@ function spkGroupBlocks(containers, fromMs, toMs, shortShows) {
 function spkBlocks(channelId, fromMs, toMs) {
   var ch = spkChannels[channelId];
   if (!ch || !ch.versions.length || toMs <= fromMs) return "[]";
-  var r0 = SPK_FN(ch, fromMs);
-  var ver0 = spkVersionByNumber(ch, r0.version);
-  var shortShows = spkShortShowsSet(ver0 ? ver0.items : null);
-
-  if (ver0 && ver0.block) {
-    // Marathon-block channel: walk back to the start of the current block (after a bump-break).
-    var cursor = r0.item.type === "bump-break" ? r0.endMs : r0.startMs;
-    for (var b = 0; b < 1000; b++) {
-      var cur = SPK_FN(ch, cursor);
-      var prev = SPK_FN(ch, cursor - 1);
-      if (prev.item.type === "bump-break" || prev.version !== cur.version || prev.startMs >= cursor) break;
-      cursor = prev.startMs;
-    }
-    var containers = [];
-    var active = null;
-    var activeVersion = null;
-    var t = cursor;
-    for (var step = 0; step < 3000; step++) {
-      var r = SPK_FN(ch, t);
-      if (active && (r.item.type === "bump-break" || r.version !== activeVersion)) {
-        containers.push(active);
-        active = null;
-        activeVersion = null;
-      }
-      if (!active && r.startMs >= toMs) break;
-      if (r.item.type === "video") {
-        if (!active) { active = []; activeVersion = r.version; }
-        active.push(spkVideoRecord(r));
-      }
-      if (r.endMs <= t) break;
-      t = r.endMs;
-    }
-    if (active && active.length) containers.push(active);
-    return JSON.stringify(spkGroupBlocks(containers, fromMs, toMs, shortShows));
+  var version, shortShows;
+  function selectVersion(number) {
+    version = spkVersionByNumber(ch, number);
+    shortShows = spkShortShowsSet(version.items);
+  }
+  function standalone(r) {
+    return r.item.type === "video" && r.item.duration >= SPK_SHORT_THRESHOLD_S
+      && !(r.item.show && shortShows[r.item.show]);
+  }
+  function boundary(prev, next) {
+    if (prev.version !== next.version) return true;
+    if (standalone(prev) || standalone(next)) return true;
+    if (version.block && (prev.item.type === "bump-break" || next.item.type === "bump-break")) return true;
+    // An all-short lineup can repeat forever. Each scheduled cycle starts a new run.
+    return prev.cycle !== next.cycle;
   }
 
-  // Regular channel: collect videos in [fromMs, toMs] and group short/sitting runs.
-  var entries = [], t2 = fromMs;
-  for (var k = 0; k < 2000 && t2 < toMs; k++) {
-    var rk = SPK_FN(ch, t2);
-    if (rk.item.type === "video") entries.push(spkVideoRecord(rk));
-    if (rk.endMs <= t2) break;
-    t2 = rk.endMs;
+  var current = SPK_FN(ch, fromMs);
+  selectVersion(current.version);
+  // A new version can take effect in the middle of its first visible item.
+  function visibleStart(r) {
+    return version === ch.versions[0] ? r.startMs : Math.max(r.startMs, version.effectiveAtMs);
   }
-  return JSON.stringify(spkGroupBlocks([entries], fromMs, toMs, shortShows));
+  var t = visibleStart(current);
+  while (!standalone(current)) {
+    var prev = SPK_FN(ch, t - 1);
+    if (boundary(prev, current) || visibleStart(prev) >= t) break;
+    current = prev;
+    t = visibleStart(current);
+  }
+
+  var entries = [], cells = [];
+  function flush() {
+    if (entries.length) cells = cells.concat(spkGroupBlocks([entries], fromMs, toMs, shortShows));
+    entries = [];
+  }
+  while (true) {
+    if (current.item.type === "video") {
+      var entry = spkVideoRecord(current);
+      entry.startMs = t;
+      entries.push(entry);
+    }
+    if (current.endMs <= t) break;
+    t = current.endMs;
+    var next = SPK_FN(ch, t);
+    if (boundary(current, next)) {
+      flush();
+      if (t >= toMs) break;
+      if (current.version !== next.version) selectVersion(next.version);
+    }
+    current = next;
+  }
+  flush();
+  return JSON.stringify(cells);
 }
 
 // ---- Overlay music (channels with audioOverlay: true, e.g. VACATION SLIDES) ----
