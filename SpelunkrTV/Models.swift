@@ -80,6 +80,8 @@ struct OnAir: Decodable, Equatable {
     let gainDb: Double?
     /// Level (0.05 to 0.3) for a tape's own sound when music is laid over it; nil on other channels.
     let ambient: Double?
+    /// Size in bytes of the tape's moov atom, when the schedule engine reports it (not yet: stays nil).
+    let moov: Int?
 
     // bump-break and up-next
     let channelSlides: [String]?
