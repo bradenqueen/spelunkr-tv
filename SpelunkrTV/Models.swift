@@ -275,7 +275,7 @@ struct GuideBlock: Decodable, Identifiable, Hashable {
 // MARK: - Helpers
 
 extension Date {
-    static var nowMs: Double { Date().timeIntervalSince1970 * 1000 }
+    nonisolated static var nowMs: Double { Date().timeIntervalSince1970 * 1000 }
     init(ms: Double) { self.init(timeIntervalSince1970: ms / 1000) }
 }
 

@@ -37,7 +37,7 @@ struct PlayerScreen: View {
                 VStack {
                     Spacer()
                     Text("TRACKING...")
-                        .font(Theme.heading(28))
+                        .font(Theme.heading(32))
                         .padding(.horizontal, 20).padding(.vertical, 10)
                         .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
                         .padding(.bottom, 80)
@@ -65,6 +65,7 @@ struct PlayerScreen: View {
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
+        .defaultFocus($focused, true)
         .onAppear {
             tv.setFullscreen(true)
             focused = true
@@ -93,9 +94,15 @@ struct PlayerScreen: View {
             if tv.onAir?.type == "video" { flashInfo() }
         }
         .onChange(of: tv.channel?.id) { _, _ in
+            // Any channel change in full screen (including one made elsewhere) shows the banner.
+            flashInfo()
             if let ch = tv.channel {
                 Task { await store.ensureDetails(for: ch) }
             }
+        }
+        .onChange(of: tv.phase) { old, new in
+            // A slow tune can outlast the banner's timer: show it again when the picture arrives.
+            if new == .playing, old != .playing { flashInfo() }
         }
     }
 
@@ -131,14 +138,16 @@ struct InfoBanner: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 26) {
+            HStack(alignment: .top, spacing: 28) {
                 VStack(spacing: 4) {
                     Text(channel.dialText)
-                        .font(Theme.dialNumber(58))
+                        .font(Theme.dialNumber(76))
                         .foregroundStyle(Theme.yellow)
                         .wsShadow()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
                 }
-                .frame(width: 148, height: 112)
+                .frame(width: 176, height: 128)
                 .background(Theme.panelBox, ignoresSafeAreaEdges: [])
                 .overlay(Rectangle().stroke(Theme.ringOuter, lineWidth: 3))
                 .overlay(Rectangle().stroke(Theme.ringInner, lineWidth: 2).padding(3))
@@ -146,38 +155,42 @@ struct InfoBanner: View {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 14) {
                         if let rows = channel.logomark?.rows, !rows.isEmpty {
-                            LogomarkView(rows: rows, primaryColor: channel.color, size: 38)
+                            LogomarkView(rows: rows, primaryColor: channel.color, size: 48)
                         }
                         Text(channel.name)
-                            .font(Theme.channelName(30))
+                            .font(Theme.channelName(34))
                             .foregroundStyle(Theme.yellow)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
                             .wsShadow()
                         if let fam = channel.family { FamilyBadge(family: fam) }
                         LiveBadge()
                         if viewers > 0 {
-                            ViewerBadge(count: viewers, suffix: "WATCHING", fontSize: 18, color: Theme.softText)
+                            ViewerBadge(count: viewers, suffix: "WATCHING", fontSize: 23, color: Theme.softText)
                         }
                     }
 
                     if let item {
                         HStack(alignment: .firstTextBaseline, spacing: 14) {
                             Text(item.displayTitle)
-                                .font(Theme.heading(42))
+                                .font(Theme.heading(50))
                                 .foregroundStyle(.white)
                                 .lineLimit(1)
+                                .truncationMode(.tail)
                                 .wsShadow()
                             if item.type == "video", let year = item.year, !year.isEmpty {
                                 Text(year)
-                                    .font(Theme.label(24))
+                                    .font(Theme.label(28))
                                     .foregroundStyle(Theme.cyan)
                             }
                         }
 
                         if let blurb, !blurb.isEmpty {
                             Text(blurb)
-                                .font(Theme.body(22))
+                                .font(Theme.body(26))
                                 .foregroundStyle(Theme.softText)
                                 .lineLimit(2)
+                                .shadow(color: .black.opacity(0.8), radius: 0, x: 1, y: 1)
                         }
 
                         TimelineView(.periodic(from: .now, by: 1)) { _ in
@@ -197,15 +210,16 @@ struct InfoBanner: View {
                                     .overlay(Rectangle().stroke(Theme.borderLight.opacity(0.8), lineWidth: 1))
                                 }
                                 .frame(height: 10)
-                                .frame(maxWidth: 720)
+                                .frame(maxWidth: 900)
 
                                 HStack(spacing: 18) {
                                     Text("\(formatDuration(leftS)) LEFT")
-                                        .font(Theme.label(22))
+                                        .font(Theme.label(25))
                                         .foregroundStyle(Theme.yellow)
+                                        .fixedSize()
                                     if let next = item.next {
                                         Text("NEXT AT \(Theme.formatTime12(next.startMs)): \(next.title)")
-                                            .font(Theme.body(22))
+                                            .font(Theme.body(25))
                                             .foregroundStyle(Theme.cyan)
                                             .lineLimit(1)
                                     }
@@ -214,7 +228,7 @@ struct InfoBanner: View {
                         }
                     } else {
                         Text("Tuning...")
-                            .font(Theme.heading(40))
+                            .font(Theme.heading(48))
                             .foregroundStyle(.white)
                     }
                 }
@@ -223,8 +237,8 @@ struct InfoBanner: View {
             .foregroundStyle(.white)
             // tvOS title-safe margins
             .padding(.horizontal, 80)
-            .padding(.top, 56)
-            .padding(.bottom, 34)
+            .padding(.top, 60)
+            .padding(.bottom, 30)
             .background(
                 LinearGradient(
                     colors: [Theme.brandPurple.opacity(0.96), Theme.deepNavy.opacity(0.92)],

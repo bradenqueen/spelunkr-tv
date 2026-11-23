@@ -174,6 +174,19 @@ final class BroadcastStore {
             g[ch.id] = await engine.upcoming(channel: ch.id, atMs: now, count: 4)
         }
         guide = g
+        await prefetchServers(engine: engine, at: now)
+    }
+
+    /// Warms the storage-server cache for what is on now across every channel (skips ids already known),
+    /// so the guide preview and channel changes find a direct URL. Runs in the background; never awaited by tuning.
+    private func prefetchServers(engine: ScheduleEngine, at now: Double) async {
+        var ids: [String] = []
+        for ch in watchableChannels {
+            if let onNow = await engine.onAir(channel: ch.id, atMs: now), onNow.isTape, onNow.file != nil, let id = onNow.id {
+                ids.append(id)
+            }
+        }
+        tv.prefetchServers(forIDs: ids)
     }
 
     // MARK: - Grid windows & channel schedules (cached per window)
