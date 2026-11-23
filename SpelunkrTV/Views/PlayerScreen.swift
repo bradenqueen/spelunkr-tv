@@ -6,6 +6,7 @@ import UIKit
 /// Menu/Back returns to the guide without interrupting playback.
 struct PlayerScreen: View {
     @Environment(BroadcastStore.self) private var store
+    @Environment(\.appTheme) private var theme
     let tv: TVPlayer
     let onExit: () -> Void
 
@@ -37,9 +38,13 @@ struct PlayerScreen: View {
                 VStack {
                     Spacer()
                     Text("TRACKING...")
-                        .font(Theme.heading(32))
+                        .font(theme.heading(32))
+                        .foregroundStyle(theme.primaryText)
                         .padding(.horizontal, 20).padding(.vertical, 10)
-                        .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+                        .background(
+                            theme.bufferingBackground,
+                            in: RoundedRectangle(cornerRadius: theme.bufferingCornerRadius)
+                        )
                         .padding(.bottom, 80)
                 }
             }
@@ -131,26 +136,35 @@ struct PlayerScreen: View {
 
 /// The "what am I watching" banner at the top of the screen.
 struct InfoBanner: View {
+    @Environment(\.appTheme) private var theme
     let channel: ChannelInfo
     let item: OnAir?
     var blurb: String? = nil
     var viewers: Int = 0
 
     var body: some View {
+        let dialShape = RoundedRectangle(cornerRadius: theme.controlCornerRadius)
+        let progressShape = RoundedRectangle(cornerRadius: min(5, theme.controlCornerRadius))
+
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 28) {
                 VStack(spacing: 4) {
                     Text(channel.dialText)
-                        .font(Theme.dialNumber(76))
-                        .foregroundStyle(Theme.yellow)
+                        .font(theme.dialNumber(76))
+                        .foregroundStyle(theme.accent)
                         .wsShadow()
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
                 }
                 .frame(width: 176, height: 128)
-                .background(Theme.panelBox, ignoresSafeAreaEdges: [])
-                .overlay(Rectangle().stroke(Theme.ringOuter, lineWidth: 3))
-                .overlay(Rectangle().stroke(Theme.ringInner, lineWidth: 2).padding(3))
+                .background(theme.raisedSurface, in: dialShape)
+                .overlay(dialShape.stroke(theme.panelBorder, lineWidth: theme.playerBorderWidth))
+                .overlay {
+                    if theme.panelInnerBorderWidth > 0 {
+                        dialShape.stroke(theme.panelInnerBorder, lineWidth: theme.panelInnerBorderWidth)
+                            .padding(theme.playerBorderWidth)
+                    }
+                }
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 14) {
@@ -158,37 +172,36 @@ struct InfoBanner: View {
                             LogomarkView(rows: rows, primaryColor: channel.color, size: 48)
                         }
                         Text(channel.name)
-                            .font(Theme.channelName(34))
-                            .foregroundStyle(Theme.yellow)
+                            .font(theme.channelName(34))
+                            .foregroundStyle(theme.accent)
                             .lineLimit(1)
                             .minimumScaleFactor(0.6)
                             .wsShadow()
                         if let fam = channel.family { FamilyBadge(family: fam) }
                         LiveBadge()
                         if viewers > 0 {
-                            ViewerBadge(count: viewers, suffix: "WATCHING", fontSize: 23, color: Theme.softText)
+                            ViewerBadge(count: viewers, suffix: "WATCHING", fontSize: 23, color: theme.softText)
                         }
                     }
 
                     if let item {
                         HStack(alignment: .firstTextBaseline, spacing: 14) {
                             Text(item.displayTitle)
-                                .font(Theme.heading(50))
-                                .foregroundStyle(.white)
+                                .font(theme.heading(50))
                                 .lineLimit(1)
                                 .truncationMode(.tail)
                                 .wsShadow()
                             if item.type == "video", let year = item.year, !year.isEmpty {
                                 Text(year)
-                                    .font(Theme.label(28))
-                                    .foregroundStyle(Theme.cyan)
+                                    .font(theme.label(28))
+                                    .foregroundStyle(theme.secondaryAccent)
                             }
                         }
 
                         if let blurb, !blurb.isEmpty {
                             Text(blurb)
-                                .font(Theme.body(26))
-                                .foregroundStyle(Theme.softText)
+                                .font(theme.body(26))
+                                .foregroundStyle(theme.softText)
                                 .lineLimit(2)
                                 .shadow(color: .black.opacity(0.8), radius: 0, x: 1, y: 1)
                         }
@@ -202,25 +215,26 @@ struct InfoBanner: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 GeometryReader { geo in
                                     ZStack(alignment: .leading) {
-                                        Rectangle().fill(Theme.deepNavy)
+                                        Rectangle().fill(theme.baseSurface)
                                         Rectangle()
-                                            .fill(Theme.progressFill)
+                                            .fill(theme.progressFill)
                                             .frame(width: geo.size.width * (elapsedS / totalS))
                                     }
-                                    .overlay(Rectangle().stroke(Theme.borderLight.opacity(0.8), lineWidth: 1))
+                                    .clipShape(progressShape)
+                                    .overlay(progressShape.stroke(theme.controlBorder.opacity(0.8), lineWidth: 1))
                                 }
                                 .frame(height: 10)
                                 .frame(maxWidth: 900)
 
                                 HStack(spacing: 18) {
                                     Text("\(formatDuration(leftS)) LEFT")
-                                        .font(Theme.label(25))
-                                        .foregroundStyle(Theme.yellow)
+                                        .font(theme.time(25))
+                                        .foregroundStyle(theme.accent)
                                         .fixedSize()
                                     if let next = item.next {
                                         Text("NEXT AT \(Theme.formatTime12(next.startMs)): \(next.title)")
-                                            .font(Theme.body(25))
-                                            .foregroundStyle(Theme.cyan)
+                                            .font(theme.body(25))
+                                            .foregroundStyle(theme.secondaryAccent)
                                             .lineLimit(1)
                                     }
                                 }
@@ -228,27 +242,26 @@ struct InfoBanner: View {
                         }
                     } else {
                         Text("Tuning...")
-                            .font(Theme.heading(48))
-                            .foregroundStyle(.white)
+                            .font(theme.heading(48))
                     }
                 }
                 Spacer()
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(theme.primaryText)
             // tvOS title-safe margins
             .padding(.horizontal, 80)
             .padding(.top, 60)
             .padding(.bottom, 30)
             .background(
                 LinearGradient(
-                    colors: [Theme.brandPurple.opacity(0.96), Theme.deepNavy.opacity(0.92)],
+                    colors: [theme.brandSurface.opacity(0.96), theme.baseSurface.opacity(0.92)],
                     startPoint: .top,
                     endPoint: .bottom
                 ),
                 ignoresSafeAreaEdges: [.top, .horizontal]
             )
             .overlay(alignment: .bottom) {
-                Rectangle().fill(Theme.ringOuter).frame(height: 3)
+                Rectangle().fill(theme.panelBorder).frame(height: theme.playerBorderWidth)
             }
             Spacer()
         }

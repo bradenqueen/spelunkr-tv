@@ -107,37 +107,50 @@ struct BumpCardView: View {
     }
 }
 
-/// TV static with a caption, for tuning and dead air.
+/// App status screen for loading, tuning and dead air.
 struct StaticView: View {
+    @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let caption: String
 
     var body: some View {
         ZStack {
-            TimelineView(.animation(minimumInterval: 1.0 / 15)) { _ in
-                Canvas { context, size in
-                    let cell: CGFloat = 8
-                    let cols = Int(size.width / cell) + 1
-                    let rows = Int(size.height / cell) + 1
-                    for _ in 0..<2400 {
-                        let x = CGFloat(Int.random(in: 0..<cols)) * cell
-                        let y = CGFloat(Int.random(in: 0..<rows)) * cell
-                        let g = Double.random(in: 0.25...0.9)
-                        context.fill(Path(CGRect(x: x, y: y, width: cell, height: cell)),
-                                     with: .color(Color(white: g)))
-                    }
-                }
+            if theme.showsAnimatedStatic && !reduceMotion {
+                animatedStatic
+            } else {
+                theme.screenBackground
             }
-            .background(Color(white: 0.12))
-            .opacity(0.55)
 
             Text(caption)
-                .font(.system(size: 40, weight: .heavy, design: .monospaced))
-                .foregroundStyle(.white)
+                .font(theme.statusCaptionFont)
+                .foregroundStyle(theme.primaryText)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 30).padding(.vertical, 18)
-                .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+                .background(
+                    theme.statusCaptionBackground,
+                    in: RoundedRectangle(cornerRadius: theme.statusCaptionCornerRadius)
+                )
                 .padding(.horizontal, 160)
         }
         .ignoresSafeArea()
+    }
+
+    private var animatedStatic: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 15)) { _ in
+            Canvas { context, size in
+                let cell: CGFloat = 8
+                let cols = Int(size.width / cell) + 1
+                let rows = Int(size.height / cell) + 1
+                for _ in 0..<2400 {
+                    let x = CGFloat(Int.random(in: 0..<cols)) * cell
+                    let y = CGFloat(Int.random(in: 0..<rows)) * cell
+                    let g = Double.random(in: 0.25...0.9)
+                    context.fill(Path(CGRect(x: x, y: y, width: cell, height: cell)),
+                                 with: .color(Color(white: g)))
+                }
+            }
+        }
+        .background(Color(white: 0.12))
+        .opacity(0.55)
     }
 }

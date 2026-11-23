@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct SpelunkrTVApp: App {
     @State private var store = BroadcastStore()
+    @AppStorage("themeMode") private var themeID = Theme.modern.id
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -15,6 +16,8 @@ struct SpelunkrTVApp: App {
         WindowGroup {
             RootView()
                 .environment(store)
+                .environment(\.appTheme, Theme.resolve(themeID))
+                .environment(\.themeSelection, $themeID)
                 .preferredColorScheme(.dark)
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {

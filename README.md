@@ -13,6 +13,7 @@
 ## Features
 
 - A TV-sized channel guide with a live preview, a scrollable program grid, and details for upcoming shows
+- Modern and Classic themes, with your choice saved on the Apple TV
 - Live viewer counts for each channel and across the guide, shared with the website
 - Same schedule as the website: your TV and the browser show the same tape at the same moment
 - Live-TV channel surfing with the Siri Remote (up and down to change channels)
@@ -20,7 +21,7 @@
 - Overlay music channels (such as Vacation Slides), including the faint projector hum
 - Picture fixes from the site: squeezed tapes are stretched back to their real shape, and tapes with a baked-in black border are zoomed to fill the screen
 - Frame-rate and dynamic-range matching: if Match Content is on in the Apple TV settings, the TV switches to each tape's frame rate and range (some TVs blank briefly while switching)
-- Static and a message when a channel has nothing scheduled or a tape will not play, then it tunes again at the next show
+- A status screen when a channel has nothing scheduled or a tape will not play, followed by a new tune at the next show
 
 ## How it works
 
@@ -102,6 +103,7 @@ If the app starts but says "The schedule engine is missing from the app", step 2
 - Move up or down between channels and left or right through the schedule
 - Select a live program to watch it, or select an upcoming program to see its details
 - Press Up from the first grid row to reach WATCH and Down to return to the grid
+- From WATCH, move right to **Theme Mode** to choose Modern (the default) or Classic (the WeatherStar look)
 - Menu/Back: leave the app
 
 **Watching**
@@ -141,7 +143,7 @@ Filter the Xcode console for the `tune` category in the `net.zerph.spelunkrtv` s
 | `SpelunkrTV/TuneLog.swift` | Tune timing logs, Instruments signposts, and guide focus debug messages |
 | `SpelunkrTV/AspectFixes.swift` | The site's stretch / zoom maps and the geometry that applies them |
 | `SpelunkrTV/PresenceClient.swift` | Live viewer counts and active-channel heartbeats |
-| `SpelunkrTV/Theme.swift` | Guide colors, typography, and font registration |
+| `SpelunkrTV/Theme.swift` | Built-in theme catalog, shared styling, and Classic font registration |
 | `SpelunkrTV/Views/GuideHome.swift` | Guide preview, channel and program details, and Watch controls |
 | `SpelunkrTV/Views/GuideGrid.swift` | Time grid, program cells, and Siri Remote focus navigation |
 | `SpelunkrTV/Views/PlayerScreen.swift` | Full-screen playback, channel changing, info banner, video layer |
@@ -153,6 +155,8 @@ Filter the Xcode console for the `tune` category in the `net.zerph.spelunkrtv` s
 | `tools/fetch-fonts.mjs` | Downloads the guide fonts and converts them from WOFF2 to TTF |
 | `tools/glue.js` | Glue code that exposes the engine to Swift (what is on now, the guide, overlay music); bundled into the generated engine file |
 | `docs/` | Project notes and README artwork |
+
+To add a built-in appearance, define it in `Theme.swift` with a new stable ID and add it to `Theme.catalog`. The picker reads that catalog directly.
 
 ## Known limitations
 
