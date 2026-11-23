@@ -6,6 +6,7 @@ import UIKit
 /// Menu/Back returns to the guide without interrupting playback.
 struct PlayerScreen: View {
     @Environment(BroadcastStore.self) private var store
+    @Environment(\.appTheme) private var theme
     let tv: TVPlayer
     let onExit: () -> Void
 
@@ -37,9 +38,13 @@ struct PlayerScreen: View {
                 VStack {
                     Spacer()
                     Text("TRACKING...")
-                        .font(Theme.heading(32))
+                        .font(theme.heading(32))
+                        .foregroundStyle(theme.primaryText)
                         .padding(.horizontal, 20).padding(.vertical, 10)
-                        .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+                        .background(
+                            theme.bufferingBackground,
+                            in: RoundedRectangle(cornerRadius: theme.bufferingCornerRadius)
+                        )
                         .padding(.bottom, 80)
                 }
             }
@@ -52,16 +57,26 @@ struct PlayerScreen: View {
                     videoIndex: tv.onAir?.videoIndex
                 )?.description
 
-                InfoBanner(
-                    channel: channel,
-                    item: tv.onAir,
-                    blurb: blurb,
-                    viewers: store.presence.count(for: channel.id)
-                )
-                .transition(.move(edge: .top).combined(with: .opacity))
+                switch theme.playerPresentation {
+                case .cable:
+                    CablePlayerOverlay(channel: channel, item: tv.onAir)
+                        .transition(.opacity)
+                case .infoBanner:
+                    InfoBanner(
+                        channel: channel,
+                        item: tv.onAir,
+                        blurb: blurb,
+                        viewers: store.presence.count(for: channel.id)
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                case .daylight, .cinema, .channelWall, .scheduleDesk, .largePrint, .spotlight:
+                    ThemedPlayerOverlay(channel: channel, item: tv.onAir)
+                        .transition(.opacity)
+                }
             }
         }
         .ignoresSafeArea()
+        .cableScanlines()
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
@@ -129,28 +144,240 @@ struct PlayerScreen: View {
     }
 }
 
+private struct CablePlayerOverlay: View {
+    @Environment(\.appTheme) private var theme
+    let channel: ChannelInfo
+    let item: OnAir?
+
+    var body: some View {
+        VStack {
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(channel.dialText).font(theme.dialNumber(82))
+                Text(channel.name.uppercased()).font(theme.channelName(30)).lineLimit(1)
+            }
+            .foregroundStyle(theme.accent)
+            .padding(22)
+            .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: theme.cellCornerRadius))
+            .frame(maxWidth: .infinity, alignment: .trailing)
+
+            Spacer()
+
+            HStack(spacing: 26) {
+                if let rows = channel.logomark?.rows, !rows.isEmpty {
+                    LogomarkView(rows: rows, primaryColor: channel.color, size: 86)
+                }
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(channel.dialText).font(theme.dialNumber(50))
+                    Text(channel.name.uppercased()).font(theme.label(26)).lineLimit(1)
+                }
+                .foregroundStyle(theme.accent)
+                .frame(width: 265, alignment: .trailing)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(item?.displayTitle ?? "Tuning…")
+                        .font(theme.heading(38)).foregroundStyle(theme.primaryText).lineLimit(1)
+                    if let item {
+                        if let year = item.year, !year.isEmpty {
+                            Text(year).font(theme.label(24)).foregroundStyle(theme.mutedText)
+                        }
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            let now = context.date.timeIntervalSince1970 * 1000
+                            let duration = max(1, item.endMs - item.startMs)
+                            let progress = min(1, max(0, (now - item.startMs) / duration))
+                            ProgressView(value: progress)
+                                .tint(theme.accent)
+                                .accessibilityLabel("Program progress")
+                            Text("\(Theme.formatTime12(item.startMs)) – \(Theme.formatTime12(item.endMs)) · \(formatDuration(item.secondsLeft(atMs: now))) left")
+                                .font(theme.time(24)).foregroundStyle(theme.mutedText).lineLimit(1)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(26)
+            .frame(maxWidth: 1440)
+            .background(theme.baseSurface.opacity(0.96), in: RoundedRectangle(cornerRadius: theme.panelCornerRadius))
+            .overlay {
+                RoundedRectangle(cornerRadius: theme.panelCornerRadius)
+                    .strokeBorder(theme.panelBorder, lineWidth: 2)
+            }
+        }
+        .padding(.horizontal, 96)
+        .padding(.vertical, 64)
+        .allowsHitTesting(false)
+    }
+}
+
+private struct ThemedPlayerOverlay: View {
+    @Environment(\.appTheme) private var theme
+    let channel: ChannelInfo
+    let item: OnAir?
+
+    private var title: String { item?.displayTitle ?? "Tuning…" }
+    private var station: String { "\(channel.dialText)  \(channel.name)" }
+
+    var body: some View {
+        content
+            .foregroundStyle(theme.primaryText)
+            .padding(.horizontal, 80)
+            .padding(.vertical, 60)
+            .allowsHitTesting(false)
+    }
+
+    @ViewBuilder private var content: some View {
+        switch theme.playerPresentation {
+        case .daylight:
+            HStack(spacing: 24) {
+                Text(station).font(theme.channelName(29)).foregroundStyle(theme.accent)
+                Divider().frame(height: 32)
+                Text(title).font(theme.heading(34))
+                Spacer(minLength: 0)
+            }
+            .lineLimit(1)
+            .padding(.horizontal, 28).padding(.vertical, 14)
+            .background(theme.baseSurface, in: Capsule())
+            .frame(maxHeight: .infinity, alignment: .top)
+        case .cinema:
+            VStack(alignment: .leading, spacing: 6) {
+                Text(station).font(theme.label(23)).foregroundStyle(theme.secondaryAccent)
+                Text(title).font(theme.heading(36)).lineLimit(2)
+                if let item {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let now = context.date.timeIntervalSince1970 * 1000
+                        Text("\(formatDuration(item.secondsLeft(atMs: now))) left")
+                            .font(theme.time(23))
+                            .foregroundStyle(theme.softText)
+                    }
+                }
+            }
+            .padding(22)
+            .background(theme.baseSurface.opacity(0.94), in: RoundedRectangle(cornerRadius: 8))
+            .frame(maxWidth: 680, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        case .channelWall:
+            HStack(spacing: 24) {
+                if let rows = channel.logomark?.rows, !rows.isEmpty {
+                    LogomarkView(rows: rows, primaryColor: channel.color, size: 84)
+                }
+                Text(channel.dialText).font(theme.dialNumber(72)).foregroundStyle(theme.accent)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(channel.name).font(theme.channelName(38))
+                    Text(title).font(theme.body(28)).foregroundStyle(theme.softText)
+                }
+            }
+            .lineLimit(1)
+            .padding(28)
+            .background(theme.baseSurface, in: RoundedRectangle(cornerRadius: theme.panelCornerRadius))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        case .scheduleDesk:
+            VStack(alignment: .leading, spacing: 18) {
+                Text(station).font(theme.channelName(26)).foregroundStyle(theme.accent)
+                HStack(alignment: .top, spacing: 30) {
+                    scheduleColumn("NOW", title: title, start: item?.startMs)
+                    scheduleColumn("NEXT", title: item?.next?.title ?? "Schedule unavailable", start: item?.next?.startMs)
+                }
+            }
+            .padding(28)
+            .background(theme.baseSurface)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+        case .largePrint:
+            VStack(alignment: .leading, spacing: 12) {
+                Text(station).font(theme.channelName(48)).lineLimit(2)
+                Text(title).font(theme.heading(76)).lineLimit(3)
+                if let item {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let now = context.date.timeIntervalSince1970 * 1000
+                        let duration = max(1, item.endMs - item.startMs)
+                        let progress = min(1, max(0, (now - item.startMs) / duration))
+                        VStack(alignment: .leading, spacing: 8) {
+                            GeometryReader { proxy in
+                                ZStack(alignment: .leading) {
+                                    Capsule().fill(theme.raisedSurface)
+                                    Capsule().fill(theme.accent)
+                                        .frame(width: proxy.size.width * progress)
+                                }
+                            }
+                            .frame(height: 16)
+                            Text("\(formatDuration(item.secondsLeft(atMs: now))) left")
+                                .font(theme.time(34))
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Program progress")
+                        .accessibilityValue("\(Int(progress * 100)) percent")
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(36)
+            .background(theme.baseSurface)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+        case .spotlight:
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title).font(theme.heading(62)).lineLimit(2)
+                HStack(spacing: 20) {
+                    if item?.type == "video", let year = item?.year, !year.isEmpty {
+                        Text(year).font(theme.label(30)).foregroundStyle(theme.secondaryAccent)
+                    }
+                    Text(station).font(theme.channelName(28))
+                }
+                if let next = item?.next {
+                    Text("Next at \(Theme.formatTime12(next.startMs))  \(next.title)")
+                        .font(theme.body(28)).foregroundStyle(theme.softText).lineLimit(1)
+                }
+            }
+            .padding(30)
+            .background(theme.baseSurface, in: RoundedRectangle(cornerRadius: theme.panelCornerRadius))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        case .infoBanner, .cable:
+            EmptyView()
+        }
+    }
+
+    private func scheduleColumn(_ label: String, title: String, start: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(label).font(theme.label(25))
+                if let start { Text(Theme.formatTime12(start)).font(theme.time(25)) }
+            }
+            .foregroundStyle(theme.secondaryAccent)
+            Text(title).font(theme.heading(38)).lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 /// The "what am I watching" banner at the top of the screen.
 struct InfoBanner: View {
+    @Environment(\.appTheme) private var theme
     let channel: ChannelInfo
     let item: OnAir?
     var blurb: String? = nil
     var viewers: Int = 0
 
     var body: some View {
+        let floatsOverVideo = theme.playerBannerCornerRadius > 0
+        let dialShape = RoundedRectangle(cornerRadius: theme.controlCornerRadius)
+        let progressShape = RoundedRectangle(cornerRadius: min(5, theme.controlCornerRadius))
+
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 28) {
                 VStack(spacing: 4) {
                     Text(channel.dialText)
-                        .font(Theme.dialNumber(76))
-                        .foregroundStyle(Theme.yellow)
+                        .font(theme.dialNumber(76))
+                        .foregroundStyle(theme.accent)
                         .wsShadow()
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
                 }
                 .frame(width: 176, height: 128)
-                .background(Theme.panelBox, ignoresSafeAreaEdges: [])
-                .overlay(Rectangle().stroke(Theme.ringOuter, lineWidth: 3))
-                .overlay(Rectangle().stroke(Theme.ringInner, lineWidth: 2).padding(3))
+                .background(theme.raisedSurface, in: dialShape)
+                .overlay(dialShape.stroke(theme.panelBorder, lineWidth: theme.playerBorderWidth))
+                .overlay {
+                    if theme.panelInnerBorderWidth > 0 {
+                        dialShape.stroke(theme.panelInnerBorder, lineWidth: theme.panelInnerBorderWidth)
+                            .padding(theme.playerBorderWidth)
+                    }
+                }
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 14) {
@@ -158,37 +385,36 @@ struct InfoBanner: View {
                             LogomarkView(rows: rows, primaryColor: channel.color, size: 48)
                         }
                         Text(channel.name)
-                            .font(Theme.channelName(34))
-                            .foregroundStyle(Theme.yellow)
+                            .font(theme.channelName(34))
+                            .foregroundStyle(theme.accent)
                             .lineLimit(1)
                             .minimumScaleFactor(0.6)
                             .wsShadow()
                         if let fam = channel.family { FamilyBadge(family: fam) }
                         LiveBadge()
                         if viewers > 0 {
-                            ViewerBadge(count: viewers, suffix: "WATCHING", fontSize: 23, color: Theme.softText)
+                            ViewerBadge(count: viewers, suffix: "WATCHING", fontSize: 23, color: theme.softText)
                         }
                     }
 
                     if let item {
                         HStack(alignment: .firstTextBaseline, spacing: 14) {
                             Text(item.displayTitle)
-                                .font(Theme.heading(50))
-                                .foregroundStyle(.white)
+                                .font(theme.heading(50))
                                 .lineLimit(1)
                                 .truncationMode(.tail)
                                 .wsShadow()
                             if item.type == "video", let year = item.year, !year.isEmpty {
                                 Text(year)
-                                    .font(Theme.label(28))
-                                    .foregroundStyle(Theme.cyan)
+                                    .font(theme.label(28))
+                                    .foregroundStyle(theme.secondaryAccent)
                             }
                         }
 
                         if let blurb, !blurb.isEmpty {
                             Text(blurb)
-                                .font(Theme.body(26))
-                                .foregroundStyle(Theme.softText)
+                                .font(theme.body(26))
+                                .foregroundStyle(theme.softText)
                                 .lineLimit(2)
                                 .shadow(color: .black.opacity(0.8), radius: 0, x: 1, y: 1)
                         }
@@ -202,25 +428,26 @@ struct InfoBanner: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 GeometryReader { geo in
                                     ZStack(alignment: .leading) {
-                                        Rectangle().fill(Theme.deepNavy)
+                                        Rectangle().fill(theme.baseSurface)
                                         Rectangle()
-                                            .fill(Theme.progressFill)
+                                            .fill(theme.progressFill)
                                             .frame(width: geo.size.width * (elapsedS / totalS))
                                     }
-                                    .overlay(Rectangle().stroke(Theme.borderLight.opacity(0.8), lineWidth: 1))
+                                    .clipShape(progressShape)
+                                    .overlay(progressShape.stroke(theme.controlBorder.opacity(0.8), lineWidth: 1))
                                 }
                                 .frame(height: 10)
                                 .frame(maxWidth: 900)
 
                                 HStack(spacing: 18) {
                                     Text("\(formatDuration(leftS)) LEFT")
-                                        .font(Theme.label(25))
-                                        .foregroundStyle(Theme.yellow)
+                                        .font(theme.time(25))
+                                        .foregroundStyle(theme.accent)
                                         .fixedSize()
                                     if let next = item.next {
                                         Text("NEXT AT \(Theme.formatTime12(next.startMs)): \(next.title)")
-                                            .font(Theme.body(25))
-                                            .foregroundStyle(Theme.cyan)
+                                            .font(theme.body(25))
+                                            .foregroundStyle(theme.secondaryAccent)
                                             .lineLimit(1)
                                     }
                                 }
@@ -228,29 +455,45 @@ struct InfoBanner: View {
                         }
                     } else {
                         Text("Tuning...")
-                            .font(Theme.heading(48))
-                            .foregroundStyle(.white)
+                            .font(theme.heading(48))
                     }
                 }
                 Spacer()
             }
-            .foregroundStyle(.white)
-            // tvOS title-safe margins
-            .padding(.horizontal, 80)
-            .padding(.top, 60)
+            .foregroundStyle(theme.primaryText)
+            .padding(.horizontal, floatsOverVideo ? 32 : 80)
+            .padding(.top, floatsOverVideo ? 28 : 60)
             .padding(.bottom, 30)
-            .background(
-                LinearGradient(
-                    colors: [Theme.brandPurple.opacity(0.96), Theme.deepNavy.opacity(0.92)],
+            .background { bannerBackdrop(floating: floatsOverVideo) }
+            // Keep the floating card inside the tvOS title-safe area.
+            .padding(.horizontal, floatsOverVideo ? 80 : 0)
+            .padding(.top, floatsOverVideo ? 60 : 0)
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func bannerBackdrop(floating: Bool) -> some View {
+        if floating {
+            let shape = RoundedRectangle(cornerRadius: theme.playerBannerCornerRadius)
+            shape.fill(.regularMaterial)
+                .overlay {
+                    shape.fill(theme.brandSurface.opacity(0.9))
+                }
+                .overlay {
+                    shape.strokeBorder(theme.panelBorder, lineWidth: theme.playerBorderWidth)
+                }
+        } else {
+            Rectangle()
+                .fill(LinearGradient(
+                    colors: [theme.brandSurface.opacity(0.96), theme.baseSurface.opacity(0.92)],
                     startPoint: .top,
                     endPoint: .bottom
-                ),
-                ignoresSafeAreaEdges: [.top, .horizontal]
-            )
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(Theme.ringOuter).frame(height: 3)
-            }
-            Spacer()
+                ))
+                .ignoresSafeArea(edges: [.top, .horizontal])
+                .overlay(alignment: .bottom) {
+                    Rectangle().fill(theme.panelBorder).frame(height: theme.playerBorderWidth)
+                }
         }
     }
 }

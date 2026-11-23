@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct SpelunkrTVApp: App {
     @State private var store = BroadcastStore()
+    @AppStorage("themeMode") private var themeID = Theme.modern.id
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -29,7 +30,12 @@ struct SpelunkrTVApp: App {
     private var broadcastView: some View {
         RootView()
             .environment(store)
-            .preferredColorScheme(.dark)
+            .environment(\.appTheme, Theme.resolve(themeID))
+            .environment(\.themeSelection, $themeID)
+            .preferredColorScheme(Theme.resolve(themeID).preferredColorScheme)
+            .onAppear {
+                if themeID == "classic" { themeID = Theme.cable.id }
+            }
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
                 case .active:
@@ -68,6 +74,7 @@ struct RootView: View {
                     }
                     isFullScreen = false
                 }
+                .environment(\.colorScheme, .dark)
             } else {
                 GuideHome(selectedChannel: $selectedChannel) { channel in
                     guard let channel = store.channels.first(where: { $0.id == channel.id }), channel.isWatchable else { return }

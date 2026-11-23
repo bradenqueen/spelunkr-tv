@@ -6,17 +6,23 @@ enum GuideFocus: Hashable {
     case channelUp
     case watch
     case viewChannel
+    case themeMode
+    case browseChannel(String)
+    case browseUpcoming(String, Double)
+    case browseSchedule(String, String)
+    case fullGuide
+    case backToBrowse
     case cell(GuideGrid.GridCellID)
 }
 
-/// 3-hour WeatherStar 4000 cable time grid.
-/// All 37 rows share the same 3-hour window (`windowStartMs`), computed lazily per visible row.
+/// Cable time grid.
+/// All rows share the same time window (`windowStartMs`), computed lazily per visible row.
 ///
-/// Focus is driven by identity, not geometry. The system focus engine may land on whatever cell is
-/// nearest, so every landing is checked against the "focus time" anchor and corrected to the cell
-/// that contains it (see `handleCellFocus`).
+/// Program cells are laid out at their time positions so tvOS can use their actual frames
+/// for touch and directional focus. Explicit focus requests handle moves across time windows.
 struct GuideGrid: View {
-    static let windowDurationMs: Double = 3 * 3600 * 1000
+    @Environment(\.appTheme) private var theme
+    private var windowDurationMs: Double { (theme.usesCableLayout ? 2 : 3) * 3600 * 1000 }
     static let stepMs: Double = 30 * 60 * 1000
     static let channelColumnWidth: CGFloat = 430
     /// Row height 80 + 2 spacing: five rows (412 pt with padding) fit the 418 pt scroll area.
@@ -33,8 +39,6 @@ struct GuideGrid: View {
     var focus: FocusState<GuideFocus?>.Binding
     let onWatch: (ChannelInfo) -> Void
 
-    /// The time a vertical move aims for. nil means "now" (focus has just entered the grid).
-    @State private var anchorMs: Double?
     /// The cell we have just asked the focus engine for; its landing is accepted without checks.
     @State private var pendingLanding: FocusLanding?
     @State private var focusRetry: Task<Void, Never>?
@@ -52,7 +56,7 @@ struct GuideGrid: View {
 
     private struct FocusLanding: Equatable {
         let cell: GridCellID
-        let intent: FocusIntent?
+        let intent: FocusIntent
     }
 
     static func currentHalfHourMs(from nowMs: Double = Date.nowMs) -> Double {
@@ -62,6 +66,11 @@ struct GuideGrid: View {
     /// The window actually shown: it never starts before the current half hour.
     private func effectiveWindowStart(nowMs: Double) -> Double {
         max(windowStartMs, Self.currentHalfHourMs(from: nowMs))
+    }
+
+    private var focusedChannelID: String? {
+        guard case .cell(let cell)? = focus.wrappedValue else { return nil }
+        return cell.channelID
     }
 
     var body: some View {
@@ -76,25 +85,17 @@ struct GuideGrid: View {
         }
         .onChange(of: focus.wrappedValue) { old, new in
             TuneLog.debug("[focus] \(String(describing: old)) -> \(String(describing: new))")
-            guard let new else { return }
+            guard let new, focusIntent == nil else { return }
             if case .cell = new { return }
-            // Focus left the grid: the next entry aims for "now" and the info panel goes back to
-            // the channel's live program.
-            anchorMs = nil
+            // First-row Up is handled by handleMove. A modal can restore focus to any guide control.
+            focusRetry?.cancel()
+            pendingLanding = nil
             inspectedBlock = nil
-            // Up out of the grid goes to WATCH, not to whichever top control happens to be nearest.
-            if case .cell? = old, new != .watch {
-                Task { @MainActor in
-                    await Task.yield()
-                    if case .cell? = focus.wrappedValue { return }
-                    focus.wrappedValue = .watch
-                }
-            }
         }
     }
 
     private func grid(startingAt windowStartMs: Double, nowMs: Double) -> some View {
-        let windowEndMs = windowStartMs + Self.windowDurationMs
+        let windowEndMs = windowStartMs + windowDurationMs
 
         return VStack(spacing: 0) {
             timeHeader(windowStartMs: windowStartMs, windowEndMs: windowEndMs, nowMs: nowMs)
@@ -112,10 +113,7 @@ struct GuideGrid: View {
                                 nowMs: nowMs,
                                 focus: focus,
                                 focusIntent: $focusIntent,
-                                onCellFocused: { ch, block, visible, previous in
-                                    handleCellFocus(channel: ch, block: block, visible: visible,
-                                                    previous: previous, windowStartMs: windowStartMs)
-                                },
+                                onCellFocused: handleCellFocus,
                                 onCellActivate: { ch, block in
                                     selectedChannel = ch
                                     if block.isAiring(atMs: Date.nowMs) {
@@ -137,109 +135,46 @@ struct GuideGrid: View {
                     .padding(.vertical, 2)
                 }
                 .clipped()
-                .task(id: focusIntent?.channelID ?? selectedChannel?.id) {
-                    if let intent = focusIntent {
-                        // Build the destination row before it attempts to land focus.
-                        proxy.scrollTo(intent.channelID, anchor: .center)
-                    } else if let selectedID = selectedChannel?.id {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(selectedID, anchor: .center)
-                        }
-                    }
+                .onChange(of: selectedChannel?.id) { _, selectedID in
+                    guard focusIntent == nil, focusedChannelID == nil, let selectedID else { return }
+                    proxy.scrollTo(selectedID, anchor: .center)
                 }
-                // Give up on a request that never finds its cell so it cannot block the remote.
                 .task(id: focusIntent) {
                     guard let intent = focusIntent else { return }
+                    // Mount the destination row if the request targets another channel.
+                    if focusedChannelID != intent.channelID {
+                        proxy.scrollTo(intent.channelID, anchor: .center)
+                    }
+                    // A missing schedule should not keep an explicit request active indefinitely.
                     try? await Task.sleep(for: .seconds(4))
                     if !Task.isCancelled, focusIntent == intent { focusIntent = nil }
                 }
             }
         }
-        .background(Theme.deepNavy.opacity(0.95))
-        .clipped()
-        .overlay(Rectangle().stroke(Theme.ringOuter, lineWidth: 2))
+        .background(theme.baseSurface.opacity(0.95))
+        .clipShape(RoundedRectangle(cornerRadius: theme.panelCornerRadius))
+        .overlay {
+            RoundedRectangle(cornerRadius: theme.panelCornerRadius)
+                .stroke(theme.panelBorder, lineWidth: max(1, theme.panelInnerBorderWidth))
+        }
     }
 
     // MARK: - Focus handling
 
-    /// Called by a row whenever focus lands on one of its cells.
-    private func handleCellFocus(channel: ChannelInfo, block: GuideBlock, visible: [GuideBlock],
-                                 previous: GuideFocus?, windowStartMs: Double) {
-        let nowMs = Date.nowMs
+    private func handleCellFocus(channel: ChannelInfo, block: GuideBlock) {
         let id = GridCellID(channelID: channel.id, blockID: block.id)
-        let requested = pendingLanding?.cell == id && pendingLanding?.intent == focusIntent
-        TuneLog.debug("[focus] landed \(channel.id) \(block.id) pending=\(requested) intent=\(focusIntent.map { $0.channelID } ?? "nil") prev=\(String(describing: previous))")
-
-        // The cell we asked for.
-        if requested {
+        if let intent = focusIntent {
+            guard pendingLanding == FocusLanding(cell: id, intent: intent) else { return }
             focusRetry?.cancel()
             pendingLanding = nil
-            accept(channel: channel, block: block, windowStartMs: windowStartMs, nowMs: nowMs)
             focusIntent = nil
-            return
         }
-        // A programmatic move is waiting for its row to load: ignore what the engine picked meanwhile.
-        if focusIntent != nil { return }
-
-        var previousCell: GridCellID?
-        if case .cell(let cell)? = previous { previousCell = cell }
-
-        // Left / Right inside a row.
-        if previousCell?.channelID == channel.id {
-            accept(channel: channel, block: block, windowStartMs: windowStartMs, nowMs: nowMs)
-            return
-        }
-
-        if previousCell == nil {
-            // Entering from the top panel (or from nowhere): always the previewed channel's row.
-            if let selected = selectedChannel, selected.id != channel.id {
-                focusIntent = FocusIntent(channelID: selected.id, atMs: nowMs)
-                return
-            }
-        }
-
-        // Up / Down from another row, or entering the right row: the cell containing the anchor.
-        let at = anchorMs ?? nowMs
-        let target = Self.cell(in: visible, at: at) ?? block
-        if target.id == block.id {
-            accept(channel: channel, block: block, windowStartMs: windowStartMs, nowMs: nowMs)
-        } else {
-            requestFocus(GridCellID(channelID: channel.id, blockID: target.id))
-        }
-    }
-
-    /// A cell has (finally) been focused for real: it becomes the selection and sets the anchor.
-    private func accept(channel: ChannelInfo, block: GuideBlock, windowStartMs: Double, nowMs: Double) {
+        TuneLog.debug("[focus] landed \(channel.id) \(block.id)")
         if selectedChannel?.id != channel.id { selectedChannel = channel }
-        let airing = block.isAiring(atMs: nowMs)
-        inspectedBlock = airing ? nil : block
-        // A vertical move lands on a cell that contains the anchor and keeps it; any other arrival
-        // (Left / Right, or entering the grid) sets it to the cell's start, but never before now.
-        if let anchor = anchorMs, block.startMs <= anchor, anchor < block.endMs {
-            // keep
-        } else {
-            anchorMs = max(block.startMs, nowMs)
-        }
-        followWindow(to: block, windowStartMs: windowStartMs, nowMs: nowMs)
+        inspectedBlock = block.isAiring(atMs: Date.nowMs) ? nil : block
     }
 
-    /// Keeps the focused cell on screen. The window never starts after now while a now cell is
-    /// focused, and a cell that only just pokes into the right edge pulls the window along.
-    private func followWindow(to block: GuideBlock, windowStartMs: Double, nowMs: Double) {
-        let floorMs = Self.currentHalfHourMs(from: nowMs)
-        var target = windowStartMs
-        if block.isAiring(atMs: nowMs) {
-            target = floorMs
-        } else if block.startMs > windowStartMs + Self.windowDurationMs - Self.stepMs {
-            let edge = windowStartMs + Self.windowDurationMs - Self.stepMs
-            target = windowStartMs + ceil((block.startMs - edge) / Self.stepMs) * Self.stepMs
-        }
-        if target != windowStartMs, target != self.windowStartMs {
-            self.windowStartMs = target
-        }
-    }
-
-    /// Left / Right / Up on a cell. Only the moves the focus engine cannot make itself matter here.
+    /// Within the loaded grid, tvOS chooses the next target. Handle only edges here.
     private func handleMove(channel: ChannelInfo, block: GuideBlock, visible: [GuideBlock],
                             direction: MoveCommandDirection, windowStartMs: Double) {
         let nowMs = Date.nowMs
@@ -250,7 +185,7 @@ struct GuideGrid: View {
             // move focus there, so one press is one move.
             guard visible.last?.id == block.id else { return }
             let next = block.endMs
-            let needed = ceil((next - (Self.windowDurationMs - Self.stepMs) - windowStartMs) / Self.stepMs)
+            let needed = ceil((next - (windowDurationMs - Self.stepMs) - windowStartMs) / Self.stepMs)
             let steps = max(1, needed)
             setWindowStart(windowStartMs + steps * Self.stepMs)
             focusIntent = FocusIntent(channelID: channel.id, atMs: next)
@@ -263,21 +198,10 @@ struct GuideGrid: View {
             let earlier = max(floorMs, min(windowStartMs - Self.stepMs, wanted))
             setWindowStart(earlier)
             focusIntent = FocusIntent(channelID: channel.id, atMs: block.startMs - 1)
-        case .up, .down:
-            // Rows are moved explicitly rather than left to the focus engine: cells are placed with
-            // .offset, so the engine's geometric search can't line them up between rows. Land on the
-            // cell of the next / previous watchable row that contains the focus-time anchor.
-            let rows = store.channels.filter(\.isWatchable)
-            guard let index = rows.firstIndex(where: { $0.id == channel.id }) else { return }
-            let target = direction == .down ? index + 1 : index - 1
-            if target < 0 {
-                // The first row has nothing above it in the grid: go to WATCH in the top panel.
-                focusIntent = nil
-                focus.wrappedValue = .watch
-                return
-            }
-            guard target < rows.count else { return }
-            focusIntent = FocusIntent(channelID: rows[target].id, atMs: anchorMs ?? nowMs)
+        case .up:
+            guard store.watchableChannels.first?.id == channel.id else { return }
+            focusIntent = nil
+            focus.wrappedValue = .watch
         default:
             break
         }
@@ -297,18 +221,16 @@ struct GuideGrid: View {
     /// Moves focus to a cell on purpose. A cell that was only just built may not take focus on the
     /// first try, so it is repeated until the focus engine accepts it (or something else moves focus).
     private func requestFocus(_ id: GridCellID) {
-        let landing = FocusLanding(cell: id, intent: focusIntent)
+        guard let intent = focusIntent else { return }
+        let landing = FocusLanding(cell: id, intent: intent)
         guard pendingLanding != landing else { return }
         TuneLog.debug("[focus] request \(id.channelID) \(id.blockID)")
         pendingLanding = landing
         focusRetry?.cancel()
         focusRetry = Task { @MainActor in
-            let before = focus.wrappedValue
             for _ in 0..<10 {
                 await Task.yield()
                 guard !Task.isCancelled, pendingLanding == landing, focusIntent == landing.intent else { break }
-                // A native intermediate landing can occur while the requested row is being mounted.
-                if landing.intent == nil, focus.wrappedValue != before { break }
                 if focus.wrappedValue != .cell(id) { focus.wrappedValue = .cell(id) }
                 try? await Task.sleep(for: .milliseconds(120))
             }
@@ -322,49 +244,51 @@ struct GuideGrid: View {
     // MARK: - Time Header
 
     private func timeHeader(windowStartMs: Double, windowEndMs: Double, nowMs: Double) -> some View {
-        let hours = hourlyTicks(from: windowStartMs, to: windowEndMs)
+        let hours = theme.usesCableLayout
+            ? (0..<4).map { windowStartMs + Double($0) * Self.stepMs }
+            : hourlyTicks(from: windowStartMs, to: windowEndMs)
         let total = store.presence.totalViewers
 
         return HStack(spacing: 0) {
             HStack(spacing: 12) {
-                Text("CHANNEL")
-                    .font(Theme.label(24))
-                    .foregroundStyle(Theme.yellow)
+                Text(theme.usesCableLayout ? "ON NOW" : "CHANNEL")
+                    .font(theme.label(24))
+                    .foregroundStyle(theme.accent)
                     .wsShadow()
                 Spacer()
                 if total > 0 {
-                    ViewerBadge(count: total, fontSize: 23, color: Theme.cyan)
+                    ViewerBadge(count: total, fontSize: 23, color: theme.secondaryAccent)
                         .wsShadow()
                 }
             }
             .padding(.horizontal, 16)
             .frame(width: Self.channelColumnWidth, height: Self.headerHeight)
-            .background(Theme.headerPurple, ignoresSafeAreaEdges: [])
+            .background(theme.gridHeaderFill, ignoresSafeAreaEdges: [])
             .overlay(alignment: .trailing) {
-                Rectangle().fill(Theme.ringOuter).frame(width: 2)
+                Rectangle().fill(theme.panelBorder).frame(width: max(1, theme.panelInnerBorderWidth))
             }
 
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Theme.headerPurple
+                    theme.gridHeaderFill
 
                     ForEach(hours, id: \.self) { tickMs in
-                        let pct = (tickMs - windowStartMs) / Self.windowDurationMs
+                        let pct = (tickMs - windowStartMs) / windowDurationMs
                         let x = max(10, min(geo.size.width - 190, geo.size.width * pct))
                         Text(Theme.formatTime12(tickMs))
-                            .font(Theme.label(27))
-                            .foregroundStyle(.white)
+                            .font(theme.time(27))
+                            .foregroundStyle(theme.primaryText)
                             .wsShadow()
                             .lineLimit(1)
                             .fixedSize()
                             .offset(x: x)
                     }
 
-                    // Small yellow "now" marker tick on the bottom edge of the time header
+                    // "Now" marker on the bottom edge of the time header.
                     if nowMs >= windowStartMs && nowMs <= windowEndMs {
-                        let nowX = geo.size.width * ((nowMs - windowStartMs) / Self.windowDurationMs)
+                        let nowX = geo.size.width * ((nowMs - windowStartMs) / windowDurationMs)
                         Rectangle()
-                            .fill(Theme.yellow)
+                            .fill(theme.liveIndicator)
                             .frame(width: 4, height: 12)
                             .frame(maxHeight: .infinity, alignment: .bottom)
                             .offset(x: nowX)
@@ -376,10 +300,10 @@ struct GuideGrid: View {
                             HStack(spacing: 6) {
                                 Image(systemName: "arrowtriangle.left.fill").font(.system(size: 14))
                                 Text("EARLIER / LATER")
-                                    .font(Theme.label(21))
+                                    .font(theme.label(21))
                                 Image(systemName: "arrowtriangle.right.fill").font(.system(size: 14))
                             }
-                            .foregroundStyle(Theme.cyan.opacity(0.9))
+                            .foregroundStyle(theme.secondaryAccent.opacity(0.9))
                             .padding(.trailing, 14)
                         }
                     }
@@ -389,7 +313,7 @@ struct GuideGrid: View {
             .clipped()
         }
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.ringOuter).frame(height: 2)
+            Rectangle().fill(theme.panelBorder).frame(height: max(1, theme.panelInnerBorderWidth))
         }
     }
 
@@ -413,6 +337,7 @@ struct GuideGrid: View {
 // MARK: - Single Channel Row
 
 private struct GuideGridRow: View {
+    @Environment(\.appTheme) private var theme
     @Environment(BroadcastStore.self) private var store
     let channel: ChannelInfo
     let isEven: Bool
@@ -422,7 +347,7 @@ private struct GuideGridRow: View {
     let nowMs: Double
     var focus: FocusState<GuideFocus?>.Binding
     @Binding var focusIntent: GuideGrid.FocusIntent?
-    let onCellFocused: (ChannelInfo, GuideBlock, [GuideBlock], GuideFocus?) -> Void
+    let onCellFocused: (ChannelInfo, GuideBlock) -> Void
     let onCellActivate: (ChannelInfo, GuideBlock) -> Void
     let onMove: (ChannelInfo, GuideBlock, [GuideBlock], MoveCommandDirection) -> Void
     let onRequestFocus: (GuideGrid.GridCellID) -> Void
@@ -441,7 +366,7 @@ private struct GuideGridRow: View {
     }
 
     /// Give a clipped live cell room for a label. Leave at least half of its neighbor visible.
-    /// This only adjusts drawing bounds; the schedule and focus anchor keep their original times.
+    /// This only adjusts drawing bounds; the program keeps its original schedule times.
     private func leadingLiveEnd(in visible: [GuideBlock], rowWidth: CGFloat) -> Double? {
         guard rowWidth > 0, let first = visible.first,
               first.startMs < windowStartMs, first.isAiring(atMs: nowMs) else { return nil }
@@ -453,16 +378,16 @@ private struct GuideGridRow: View {
     }
 
     var body: some View {
-        let rowBg = isEven ? Theme.deepNavy.opacity(0.92) : Theme.gridMidBlue.opacity(0.38)
+        let rowBg = isEven ? theme.baseSurface.opacity(0.92) : theme.alternateRowFill.opacity(0.38)
         let viewers = store.presence.count(for: channel.id)
 
         HStack(spacing: 0) {
             // Pinned channel column
             HStack(spacing: 10) {
                 Text(channel.dialText)
-                    .font(Theme.dialNumber(52))
-                    .foregroundStyle(Theme.yellow)
-                    .shadow(color: .black.opacity(0.9), radius: 0, x: 2, y: 2)
+                    .font(theme.dialNumber(theme.usesCableLayout ? 36 : 52))
+                    .foregroundStyle(theme.usesCableLayout ? theme.primaryText : theme.accent)
+                    .wsShadow()
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
                     .frame(width: 88, alignment: .trailing)
@@ -476,29 +401,29 @@ private struct GuideGridRow: View {
                 }
 
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(channel.name)
-                        .font(Theme.channelName(24))
-                        .foregroundStyle(.white)
+                    Text(theme.usesCableLayout ? channel.name.uppercased() : channel.name)
+                        .font(theme.channelName(24))
+                        .foregroundStyle(theme.usesCableLayout ? (Color(hex: channel.color) ?? theme.secondaryAccent) : theme.primaryText)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                         .wsShadow()
                     if channel.comingSoon == true {
                         Text("COMING SOON")
-                            .font(Theme.label(23))
-                            .foregroundStyle(Theme.yellow)
+                            .font(theme.label(23))
+                            .foregroundStyle(theme.accent)
                             .lineLimit(1)
-                    } else if viewers > 0 {
-                        ViewerBadge(count: viewers, fontSize: 23, color: isSelectedRow ? Theme.cyan : Theme.blueMuted)
+                    } else if viewers > 0, !theme.usesCableLayout {
+                        ViewerBadge(count: viewers, fontSize: 23, color: isSelectedRow ? theme.secondaryAccent : theme.mutedText)
                     }
                 }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 12)
             .frame(width: GuideGrid.channelColumnWidth, height: GuideGrid.rowHeight)
-            .background(isSelectedRow ? AnyShapeStyle(Theme.focusRowGradient) : AnyShapeStyle(Theme.panelBox.opacity(0.95)), ignoresSafeAreaEdges: [])
+            .background(isSelectedRow ? theme.selectedRowFill : AnyShapeStyle(theme.raisedSurface.opacity(0.95)), ignoresSafeAreaEdges: [])
             .clipped()
             .overlay(alignment: .trailing) {
-                Rectangle().fill(Theme.ringOuter).frame(width: 2)
+                Rectangle().fill(theme.panelBorder).frame(width: max(1, theme.panelInnerBorderWidth))
             }
 
             // Proportional program cells
@@ -514,41 +439,48 @@ private struct GuideGridRow: View {
 
                     if visible.isEmpty {
                         Text(channel.comingSoon == true ? "COMING SOON" : "Loading schedule…")
-                            .font(Theme.gridText(26))
-                            .foregroundStyle(Theme.blueMuted.opacity(0.75))
+                            .font(theme.gridText(26))
+                            .foregroundStyle(theme.mutedText.opacity(0.75))
                             .padding(.horizontal, 16)
                     } else {
-                        ForEach(visible) { block in
-                            let start = block.id == secondID ? max(block.startMs, leadingEnd ?? block.startMs) : block.startMs
-                            let end = block.id == firstID ? leadingEnd ?? block.endMs : block.endMs
-                            let clampedStart = max(start, windowStartMs)
-                            let clampedEnd = min(end, windowEndMs)
-                            let leftX = geo.size.width * ((clampedStart - windowStartMs) / totalMs)
-                            let rawWidth = geo.size.width * (max(0, clampedEnd - clampedStart) / totalMs)
-                            let width = max(0, rawWidth - min(2, rawWidth / 2))
-                            let cellID = GuideGrid.GridCellID(channelID: channel.id, blockID: block.id)
+                        ProgramCellLayout {
+                            ForEach(visible) { block in
+                                let start = block.id == secondID ? max(block.startMs, leadingEnd ?? block.startMs) : block.startMs
+                                let end = block.id == firstID ? leadingEnd ?? block.endMs : block.endMs
+                                let clampedStart = max(start, windowStartMs)
+                                let clampedEnd = min(end, windowEndMs)
+                                let leftX = geo.size.width * ((clampedStart - windowStartMs) / totalMs)
+                                let rawWidth = geo.size.width * (max(0, clampedEnd - clampedStart) / totalMs)
+                                let width = max(0, rawWidth - min(2, rawWidth / 2))
+                                let cellID = GuideGrid.GridCellID(channelID: channel.id, blockID: block.id)
+                                let isCurrent = block.isAiring(atMs: nowMs)
 
-                            Button {
-                                onCellActivate(channel, block)
-                            } label: {
-                                GuideProgramCell(
-                                    channelName: channel.name,
-                                    block: block,
-                                    isCurrent: block.isAiring(atMs: nowMs),
-                                    isRowSelected: isSelectedRow,
-                                    nowMs: nowMs
+                                Button {
+                                    onCellActivate(channel, block)
+                                } label: {
+                                    GuideProgramCell(
+                                        channelName: channel.name,
+                                        block: block,
+                                        isCurrent: isCurrent,
+                                        isRowSelected: isSelectedRow,
+                                        nowMs: nowMs
+                                    )
+                                    .frame(width: width, height: GuideGrid.rowHeight - 2)
+                                    .clipped()
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(SpelunkrPlainFocusButtonStyle())
+                                .accessibilityValue(isCurrent ? Text("Live") : Text(""))
+                                .disabled(!channel.isWatchable)
+                                .focused(focus, equals: .cell(cellID))
+                                .onMoveCommand { direction in
+                                    onMove(channel, block, visible, direction)
+                                }
+                                .layoutValue(
+                                    key: ProgramCellFrame.self,
+                                    value: CGRect(x: leftX, y: 0, width: width, height: GuideGrid.rowHeight - 2)
                                 )
-                                .frame(width: width, height: GuideGrid.rowHeight - 2)
-                                .clipped()
-                                .contentShape(Rectangle())
                             }
-                            .buttonStyle(SpelunkrPlainFocusButtonStyle())
-                            .disabled(!channel.isWatchable)
-                            .focused(focus, equals: .cell(cellID))
-                            .onMoveCommand { direction in
-                                onMove(channel, block, visible, direction)
-                            }
-                            .offset(x: leftX)
                         }
                     }
 
@@ -556,7 +488,7 @@ private struct GuideGridRow: View {
                     if nowMs >= windowStartMs && nowMs < windowEndMs {
                         let nowX = geo.size.width * ((nowMs - windowStartMs) / totalMs)
                         Rectangle()
-                            .fill(Theme.yellow.opacity(0.65))
+                            .fill(theme.liveIndicator.opacity(0.65))
                             .frame(width: 2, height: 7)
                             .frame(height: GuideGrid.rowHeight, alignment: .bottom)
                             .offset(x: nowX)
@@ -570,8 +502,8 @@ private struct GuideGridRow: View {
         .frame(height: GuideGrid.rowHeight)
         .clipped()
         .overlay(
-            Rectangle()
-                .strokeBorder(isSelectedRow ? Theme.yellow : Theme.gridLine, lineWidth: isSelectedRow ? 3 : 1)
+            RoundedRectangle(cornerRadius: theme.usesCableLayout ? theme.cellCornerRadius : 0)
+                .strokeBorder(isSelectedRow ? theme.selectedBorder : theme.gridLine, lineWidth: isSelectedRow ? 3 : 1)
         )
         .task(id: taskKey) {
             let updated = await store.blocks(for: channel.id, fromMs: windowStartMs, toMs: windowEndMs)
@@ -583,10 +515,10 @@ private struct GuideGridRow: View {
         .onChange(of: focusIntent) { _, _ in
             fulfillIntent(blocks: blocks, loadedFor: loadedWindowStartMs)
         }
-        .onChange(of: focus.wrappedValue) { old, new in
+        .onChange(of: focus.wrappedValue) { _, new in
             guard case .cell(let id)? = new, id.channelID == channel.id,
                   let block = blocks.first(where: { $0.id == id.blockID }) else { return }
-            onCellFocused(channel, block, visibleBlocks, old)
+            onCellFocused(channel, block)
         }
     }
 
@@ -602,7 +534,28 @@ private struct GuideGridRow: View {
         onRequestFocus(targetID)
         if focus.wrappedValue == .cell(targetID) {
             // Native focus may already be at the destination before the row fulfils the intent.
-            onCellFocused(channel, target, visible, focus.wrappedValue)
+            onCellFocused(channel, target)
+        }
+    }
+}
+
+private struct ProgramCellFrame: LayoutValueKey {
+    static let defaultValue: CGRect = .zero
+}
+
+private struct ProgramCellLayout: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for subview in subviews {
+            let frame = subview[ProgramCellFrame.self]
+            subview.place(
+                at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(frame.size)
+            )
         }
     }
 }
@@ -610,6 +563,7 @@ private struct GuideGridRow: View {
 // MARK: - Program / Marathon Cell
 
 private struct GuideProgramCell: View {
+    @Environment(\.appTheme) private var theme
     let channelName: String
     let block: GuideBlock
     let isCurrent: Bool
@@ -641,35 +595,46 @@ private struct GuideProgramCell: View {
 
         VStack(alignment: .leading, spacing: 0) {
             Text(primaryTitle)
-                .font(Theme.gridText(29))
-                .foregroundStyle(.white)
+                .font(theme.gridText(29))
+                .foregroundStyle(theme.primaryText)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .wsShadow()
 
-            Text(subtitle)
-                .font(Theme.label(23))
-                .foregroundStyle(isCellFocused ? Theme.softText : (block.isMarathon ? Theme.cyan : Theme.blueMuted))
-                .lineLimit(1)
-                .truncationMode(.tail)
+            if !theme.usesCableLayout {
+                Text(subtitle)
+                    .font(theme.label(23))
+                    .foregroundStyle(isCellFocused ? theme.softText : (block.isMarathon ? theme.secondaryAccent : theme.mutedText))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 3)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(cellBackground, ignoresSafeAreaEdges: [])
-        .overlay(
-            Rectangle()
-                .strokeBorder(isCellFocused ? Theme.yellow : Theme.ringOuter.opacity(0.65), lineWidth: isCellFocused ? 4 : 1)
-        )
+        .background(cellBackground, in: RoundedRectangle(cornerRadius: theme.cellCornerRadius))
+        .overlay {
+            RoundedRectangle(cornerRadius: theme.cellCornerRadius)
+                .strokeBorder(isCellFocused ? theme.focusBorder : theme.panelBorder.opacity(0.65), lineWidth: isCellFocused ? 4 : 1)
+        }
+        .overlay(alignment: .leading) {
+            if isCurrent, let marker = theme.liveProgramMarker {
+                Capsule()
+                    .fill(marker)
+                    .frame(width: 3, height: 22)
+                    .padding(.leading, 6)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     private var cellBackground: AnyShapeStyle {
         if isCellFocused {
-            return AnyShapeStyle(Theme.focusRowGradient)
+            return AnyShapeStyle(theme.focusedFill)
         }
         if isCurrent {
-            return AnyShapeStyle(Color.white.opacity(isRowSelected ? 0.14 : 0.08))
+            return AnyShapeStyle(theme.usesCableLayout ? theme.alternateRowFill : Color.white.opacity(isRowSelected ? 0.14 : 0.08))
         }
-        return AnyShapeStyle(Theme.panelBox.opacity(0.55))
+        return AnyShapeStyle(theme.raisedSurface.opacity(0.55))
     }
 }
