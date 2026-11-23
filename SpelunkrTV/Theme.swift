@@ -63,64 +63,17 @@ struct Theme: Identifiable {
         case system(headingDesign: Font.Design)
     }
 
-    static let classic: Theme = {
-        let brandSurface = rgb(0x1C0A57)
-        let baseSurface = rgb(0x001040)
-        let accent = rgb(0xFFFF00)
-        let focusFill = vertical([rgb(0xC86006), rgb(0x92441A), rgb(0x52243C)])
+    enum GuideLayout: String {
+        case timeline, daylight, cinema, channelWall, scheduleDesk, largePrint, spotlight
+    }
 
-        return Theme(
-            id: "classic",
-            name: "Classic",
-            summary: "WeatherStar lettering, bright colors, and beveled panels.",
-            brandSurface: brandSurface,
-            gridHeaderFill: rgb(0x200057),
-            baseSurface: baseSurface,
-            alternateRowFill: rgb(0x102080),
-            raisedSurface: rgb(0x21285A),
-            gridLine: rgb(0x000A30),
-            accent: accent,
-            secondaryAccent: rgb(0x8FFDFA),
-            primaryText: .white,
-            softText: rgb(0xE6E8FF),
-            mutedText: rgb(0xA8A8FF),
-            controlBorder: rgb(0x857BBE),
-            panelBorder: rgb(0x2652B2),
-            panelInnerBorder: rgb(0x232C64),
-            liveBadgeAccent: rgb(0xFF3B4E),
-            liveIndicator: accent,
-            liveProgramMarker: nil,
-            warningAccent: .orange,
-            focusBorder: accent,
-            selectedBorder: accent,
-            screenBackground: vertical([brandSurface, rgb(0x0B1045), baseSurface]),
-            panelFill: vertical([rgb(0x272F6A), rgb(0x161C48)]),
-            primaryActionFill: vertical([rgb(0xD26606), rgb(0x9F4A14), rgb(0x58263A)]),
-            focusedFill: focusFill,
-            secondaryActionFill: vertical([rgb(0x5A55C8), rgb(0x2A26C8), rgb(0x0202C8)]),
-            progressFill: vertical([accent, rgb(0xD9B400)]),
-            selectedRowFill: AnyShapeStyle(focusFill),
-            panelCornerRadius: 2,
-            controlCornerRadius: 0,
-            cellCornerRadius: 0,
-            panelBorderWidth: 4,
-            panelInnerBorderWidth: 2,
-            playerBorderWidth: 3,
-            playerBannerCornerRadius: 0,
-            showsAnimatedStatic: true,
-            statusCaptionFont: .system(size: 40, weight: .heavy, design: .monospaced),
-            statusCaptionBackground: .black.opacity(0.7),
-            statusCaptionCornerRadius: 10,
-            bufferingBackground: .black.opacity(0.7),
-            bufferingCornerRadius: 8,
-            buttonFocusFill: nil,
-            buttonFocusBrightness: 0.12,
-            buttonFocusScale: 1.04,
-            buttonBorderWidth: 2,
-            showsTextShadow: true,
-            typography: .weatherStar
-        )
-    }()
+    enum PlayerPresentation {
+        case infoBanner, cable, daylight, cinema, channelWall, scheduleDesk, largePrint, spotlight
+    }
+
+    var guideLayout: GuideLayout = .timeline
+    var playerPresentation: PlayerPresentation = .infoBanner
+    var preferredColorScheme: ColorScheme { guideLayout == .daylight ? .light : .dark }
 
     static let modern: Theme = {
         let brandSurface = rgb(0x211839)
@@ -308,17 +261,91 @@ struct Theme: Identifiable {
             buttonFocusScale: 1.015,
             buttonBorderWidth: 2,
             showsTextShadow: false,
-            typography: .weatherStar
+            typography: .weatherStar,
+            playerPresentation: .cable
         )
     }()
 
     var usesCableLayout: Bool { id == Self.cable.id }
 
-    /// The order here is the order in the Theme Mode picker. Keep IDs stable for saved choices.
-    static let catalog: [Theme] = [.modern, .neon, .cable, .classic]
+    private static func edition(
+        _ layout: GuideLayout, _ player: PlayerPresentation, name: String, summary: String,
+        canvas: UInt32, panel: UInt32, raised: UInt32, ink: UInt32, secondaryInk: UInt32,
+        accent: UInt32, secondary: UInt32, focus: UInt32, border: UInt32,
+        radius: CGFloat, heading: Font.Design = .default
+    ) -> Theme {
+        let base = rgb(canvas), surface = rgb(panel), upper = rgb(raised)
+        let text = rgb(ink), subdued = rgb(secondaryInk), highlight = rgb(accent)
+        let detail = rgb(secondary), active = rgb(focus), line = rgb(border)
+        let focused = vertical([active, active])
+        return Theme(
+            id: layout.rawValue, name: name, summary: summary,
+            brandSurface: surface, gridHeaderFill: upper, baseSurface: base,
+            alternateRowFill: surface, raisedSurface: upper, gridLine: line,
+            accent: highlight, secondaryAccent: detail, primaryText: text,
+            softText: subdued, mutedText: subdued, controlBorder: line, panelBorder: line,
+            panelInnerBorder: .clear, liveBadgeAccent: detail, liveIndicator: highlight,
+            liveProgramMarker: highlight, warningAccent: detail, focusBorder: highlight,
+            selectedBorder: detail, screenBackground: vertical([base, surface]),
+            panelFill: vertical([surface, surface]), primaryActionFill: focused,
+            focusedFill: focused, secondaryActionFill: vertical([upper, upper]),
+            progressFill: vertical([highlight, detail]), selectedRowFill: AnyShapeStyle(upper),
+            panelCornerRadius: radius, controlCornerRadius: radius, cellCornerRadius: radius / 2,
+            panelBorderWidth: 1, panelInnerBorderWidth: 0, playerBorderWidth: 1,
+            playerBannerCornerRadius: radius, showsAnimatedStatic: false,
+            statusCaptionFont: .system(size: 38, weight: .semibold),
+            statusCaptionBackground: surface, statusCaptionCornerRadius: radius,
+            bufferingBackground: surface, bufferingCornerRadius: radius,
+            buttonFocusFill: active, buttonFocusBrightness: 0, buttonFocusScale: 1.015,
+            buttonBorderWidth: 2, showsTextShadow: false,
+            typography: .system(headingDesign: heading), guideLayout: layout, playerPresentation: player
+        )
+    }
+
+    static let daylight = edition(
+        .daylight, .daylight, name: "Daylight", summary: "A light guide with a preview and an airy channel list.",
+        canvas: 0xF8F6EF, panel: 0xF1EFE6, raised: 0xE4E7DB, ink: 0x17281F,
+        secondaryInk: 0x46544A, accent: 0x185A44, secondary: 0x824215,
+        focus: 0xCDDFD2, border: 0x84968A, radius: 10
+    )
+    static let cinema = edition(
+        .cinema, .cinema, name: "Cinema", summary: "A large live preview beside a vertical list of channels.",
+        canvas: 0x110D0D, panel: 0x221919, raised: 0x342627, ink: 0xFFF4E9,
+        secondaryInk: 0xD7C5BC, accent: 0xF5C981, secondary: 0xF9A79A,
+        focus: 0x584031, border: 0x76605B, radius: 4, heading: .serif
+    )
+    static let channelWall = edition(
+        .channelWall, .channelWall, name: "Channel Wall", summary: "Browse stations on a wall of channel tiles.",
+        canvas: 0x091721, panel: 0x122733, raised: 0x183746, ink: 0xF2FAFC,
+        secondaryInk: 0xB8D7DE, accent: 0x76E3D0, secondary: 0xF5CD78,
+        focus: 0x23505B, border: 0x537884, radius: 14, heading: .rounded
+    )
+    static let scheduleDesk = edition(
+        .scheduleDesk, .scheduleDesk, name: "Schedule Desk", summary: "An agenda of programs alongside the channel roster.",
+        canvas: 0x111B19, panel: 0x1A2824, raised: 0x283A32, ink: 0xF5F2DB,
+        secondaryInk: 0xC8D3BE, accent: 0xDCE99A, secondary: 0xA4DCCC,
+        focus: 0x40503B, border: 0x647969, radius: 2, heading: .monospaced
+    )
+    static let largePrint = edition(
+        .largePrint, .largePrint, name: "Large Print", summary: "Oversized channel rows and high-contrast controls.",
+        canvas: 0x080808, panel: 0x101010, raised: 0x272727, ink: 0xFFFFFF,
+        secondaryInk: 0xF5F5F5, accent: 0xFFDF55, secondary: 0xA4ECFF,
+        focus: 0x383838, border: 0xAFAFAF, radius: 8
+    )
+    static let spotlight = edition(
+        .spotlight, .spotlight, name: "Spotlight", summary: "Browse what is on now or coming up in two rows of program cards.",
+        canvas: 0x191222, panel: 0x291D36, raised: 0x3D2B48, ink: 0xFFF2FA,
+        secondaryInk: 0xE4CDE1, accent: 0xFFC2DC, secondary: 0xCCD2FF,
+        focus: 0x583B55, border: 0x886981, radius: 18, heading: .serif
+    )
+
+    static let catalog: [Theme] = [
+        .modern, .neon, .cable, .daylight, .cinema, .channelWall, .scheduleDesk, .largePrint, .spotlight
+    ]
 
     static func resolve(_ id: String) -> Theme {
-        catalog.first { $0.id == id } ?? modern
+        if id == "classic" { return cable }
+        return catalog.first { $0.id == id } ?? modern
     }
 
     private static func rgb(_ hex: UInt32) -> Color {
@@ -530,7 +557,7 @@ private struct SpelunkrActionButtonBody: View {
             .overlay(
                 shape.strokeBorder(
                     isFocused ? theme.focusBorder : (restingBorder ?? theme.controlBorder),
-                    lineWidth: isFocused ? 4 : theme.buttonBorderWidth
+                    lineWidth: isFocused ? (theme.guideLayout == .largePrint ? 6 : 4) : theme.buttonBorderWidth
                 )
             )
             .brightness(isFocused ? theme.buttonFocusBrightness : 0)

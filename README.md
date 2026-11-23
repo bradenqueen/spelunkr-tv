@@ -13,7 +13,7 @@
 ## Features
 
 - A TV-sized channel guide with a live preview, a scrollable program grid, and details for upcoming shows
-- Modern, Neon, Cable Guide, and Classic themes, with your choice saved on the Apple TV
+- Nine selectable themes, with your choice saved on the Apple TV
 - Live viewer counts for each channel and across the guide, shared with the website
 - Same schedule as the website: your TV and the browser show the same tape at the same moment
 - Live-TV channel surfing with the Siri Remote (up and down to change channels)
@@ -105,6 +105,7 @@ If the app starts but says "The schedule engine is missing from the app", step 2
 - Press Play/Pause to jump to what's on now for the highlighted channel
 - Press Up from the first grid row to reach WATCH. Press Down from the top controls to return to the live program
 - From WATCH, move right to **Theme Mode** to choose a theme. **Cable Guide** uses a two-hour grid and a classic tuning display. In that theme, open **Settings** to switch themes or toggle CRT scanlines.
+- Daylight, Cinema, Channel Wall, Schedule Desk, Large Print, and Spotlight offer different ways to browse. Use **Full Guide** for the timeline, then **Back to Browse** or Menu/Back to return.
 - From View Channel or Theme Mode, use **Back to Guide** or Menu/Back to return to the control you came from
 - Menu/Back from the main guide: leave the app
 
@@ -145,7 +146,7 @@ Filter the Xcode console for the `tune` category in the `net.zerph.spelunkrtv` s
 | `SpelunkrTV/TuneLog.swift` | Tune timing logs, Instruments signposts, and guide focus debug messages |
 | `SpelunkrTV/AspectFixes.swift` | The site's stretch / zoom maps and the geometry that applies them |
 | `SpelunkrTV/PresenceClient.swift` | Live viewer counts and active-channel heartbeats |
-| `SpelunkrTV/Theme.swift` | Built-in theme catalog, shared styling, and Classic font registration |
+| `SpelunkrTV/Theme.swift` | Built-in theme catalog, shared styling, and retro font registration |
 | `SpelunkrTV/Views/GuideHome.swift` | Guide preview, channel and program details, and Watch controls |
 | `SpelunkrTV/Views/GuideGrid.swift` | Time grid, program cells, and Siri Remote focus navigation |
 | `SpelunkrTV/Views/PlayerScreen.swift` | Full-screen playback, channel changing, info banner, video layer |

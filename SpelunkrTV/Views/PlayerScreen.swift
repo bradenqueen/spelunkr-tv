@@ -57,10 +57,11 @@ struct PlayerScreen: View {
                     videoIndex: tv.onAir?.videoIndex
                 )?.description
 
-                if theme.usesCableLayout {
+                switch theme.playerPresentation {
+                case .cable:
                     CablePlayerOverlay(channel: channel, item: tv.onAir)
                         .transition(.opacity)
-                } else {
+                case .infoBanner:
                     InfoBanner(
                         channel: channel,
                         item: tv.onAir,
@@ -68,6 +69,9 @@ struct PlayerScreen: View {
                         viewers: store.presence.count(for: channel.id)
                     )
                     .transition(.move(edge: .top).combined(with: .opacity))
+                case .daylight, .cinema, .channelWall, .scheduleDesk, .largePrint, .spotlight:
+                    ThemedPlayerOverlay(channel: channel, item: tv.onAir)
+                        .transition(.opacity)
                 }
             }
         }
@@ -201,6 +205,144 @@ private struct CablePlayerOverlay: View {
         .padding(.horizontal, 96)
         .padding(.vertical, 64)
         .allowsHitTesting(false)
+    }
+}
+
+private struct ThemedPlayerOverlay: View {
+    @Environment(\.appTheme) private var theme
+    let channel: ChannelInfo
+    let item: OnAir?
+
+    private var title: String { item?.displayTitle ?? "Tuning…" }
+    private var station: String { "\(channel.dialText)  \(channel.name)" }
+
+    var body: some View {
+        content
+            .foregroundStyle(theme.primaryText)
+            .padding(.horizontal, 80)
+            .padding(.vertical, 60)
+            .allowsHitTesting(false)
+    }
+
+    @ViewBuilder private var content: some View {
+        switch theme.playerPresentation {
+        case .daylight:
+            HStack(spacing: 24) {
+                Text(station).font(theme.channelName(29)).foregroundStyle(theme.accent)
+                Divider().frame(height: 32)
+                Text(title).font(theme.heading(34))
+                Spacer(minLength: 0)
+            }
+            .lineLimit(1)
+            .padding(.horizontal, 28).padding(.vertical, 14)
+            .background(theme.baseSurface, in: Capsule())
+            .frame(maxHeight: .infinity, alignment: .top)
+        case .cinema:
+            VStack(alignment: .leading, spacing: 6) {
+                Text(station).font(theme.label(23)).foregroundStyle(theme.secondaryAccent)
+                Text(title).font(theme.heading(36)).lineLimit(2)
+                if let item {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let now = context.date.timeIntervalSince1970 * 1000
+                        Text("\(formatDuration(item.secondsLeft(atMs: now))) left")
+                            .font(theme.time(23))
+                            .foregroundStyle(theme.softText)
+                    }
+                }
+            }
+            .padding(22)
+            .background(theme.baseSurface.opacity(0.94), in: RoundedRectangle(cornerRadius: 8))
+            .frame(maxWidth: 680, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        case .channelWall:
+            HStack(spacing: 24) {
+                if let rows = channel.logomark?.rows, !rows.isEmpty {
+                    LogomarkView(rows: rows, primaryColor: channel.color, size: 84)
+                }
+                Text(channel.dialText).font(theme.dialNumber(72)).foregroundStyle(theme.accent)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(channel.name).font(theme.channelName(38))
+                    Text(title).font(theme.body(28)).foregroundStyle(theme.softText)
+                }
+            }
+            .lineLimit(1)
+            .padding(28)
+            .background(theme.baseSurface, in: RoundedRectangle(cornerRadius: theme.panelCornerRadius))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        case .scheduleDesk:
+            VStack(alignment: .leading, spacing: 18) {
+                Text(station).font(theme.channelName(26)).foregroundStyle(theme.accent)
+                HStack(alignment: .top, spacing: 30) {
+                    scheduleColumn("NOW", title: title, start: item?.startMs)
+                    scheduleColumn("NEXT", title: item?.next?.title ?? "Schedule unavailable", start: item?.next?.startMs)
+                }
+            }
+            .padding(28)
+            .background(theme.baseSurface)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+        case .largePrint:
+            VStack(alignment: .leading, spacing: 12) {
+                Text(station).font(theme.channelName(48)).lineLimit(2)
+                Text(title).font(theme.heading(76)).lineLimit(3)
+                if let item {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let now = context.date.timeIntervalSince1970 * 1000
+                        let duration = max(1, item.endMs - item.startMs)
+                        let progress = min(1, max(0, (now - item.startMs) / duration))
+                        VStack(alignment: .leading, spacing: 8) {
+                            GeometryReader { proxy in
+                                ZStack(alignment: .leading) {
+                                    Capsule().fill(theme.raisedSurface)
+                                    Capsule().fill(theme.accent)
+                                        .frame(width: proxy.size.width * progress)
+                                }
+                            }
+                            .frame(height: 16)
+                            Text("\(formatDuration(item.secondsLeft(atMs: now))) left")
+                                .font(theme.time(34))
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Program progress")
+                        .accessibilityValue("\(Int(progress * 100)) percent")
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(36)
+            .background(theme.baseSurface)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+        case .spotlight:
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title).font(theme.heading(62)).lineLimit(2)
+                HStack(spacing: 20) {
+                    if item?.type == "video", let year = item?.year, !year.isEmpty {
+                        Text(year).font(theme.label(30)).foregroundStyle(theme.secondaryAccent)
+                    }
+                    Text(station).font(theme.channelName(28))
+                }
+                if let next = item?.next {
+                    Text("Next at \(Theme.formatTime12(next.startMs))  \(next.title)")
+                        .font(theme.body(28)).foregroundStyle(theme.softText).lineLimit(1)
+                }
+            }
+            .padding(30)
+            .background(theme.baseSurface, in: RoundedRectangle(cornerRadius: theme.panelCornerRadius))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        case .infoBanner, .cable:
+            EmptyView()
+        }
+    }
+
+    private func scheduleColumn(_ label: String, title: String, start: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text(label).font(theme.label(25))
+                if let start { Text(Theme.formatTime12(start)).font(theme.time(25)) }
+            }
+            .foregroundStyle(theme.secondaryAccent)
+            Text(title).font(theme.heading(38)).lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

@@ -1,9 +1,6 @@
 import SwiftUI
 
-/// The guide home screen:
-/// - Top left: live preview window with channel down/up controls and SPELUNKR.TV badge.
-/// - Top right: channel and program information, playback actions, and Theme Mode.
-/// - Bottom: shared 3-hour `GuideGrid`.
+/// Shared navigation, channel selection, and preview tuning for the timeline and browse layouts.
 struct GuideHome: View {
     @Environment(\.appTheme) private var theme
     @Environment(BroadcastStore.self) private var store
@@ -14,6 +11,10 @@ struct GuideHome: View {
     @State private var windowStartMs: Double = GuideGrid.currentHalfHourMs()
     @State private var presentation: Presentation?
     @State private var focusAfterDismissal: GuideFocus?
+    @State private var showingFullGuide = false
+    @State private var browseFocusRequest: BrowseFocusRequest?
+    @State private var lastBrowseFocus: GuideFocus?
+    @State private var channelBeforeFullGuide: ChannelInfo?
     @State private var hasAppeared = false
     @State private var previewDebounceTask: Task<Void, Never>?
     @State private var focusIntent: GuideGrid.FocusIntent?
@@ -22,11 +23,13 @@ struct GuideHome: View {
     private enum Presentation: Identifiable {
         case channelSchedule(ChannelInfo)
         case themePicker
+        case program(ChannelInfo, GuideEntry)
 
         var id: String {
             switch self {
             case .channelSchedule(let channel): return "schedule-\(channel.id)"
             case .themePicker: return "theme-picker"
+            case .program(let channel, let entry): return "program-\(channel.id)-\(entry.startMs)"
             }
         }
     }
@@ -52,31 +55,19 @@ struct GuideHome: View {
                     }
             }
 
-            // Top section: Live preview (left) + Info panel (right), aligned flush at 480pt tall
-            // A focus section, so Down from any control here reaches the grid and Up from the grid reaches WATCH.
-            Group {
-                if theme.usesCableLayout {
-                    cableGuideHeader
-                } else {
-                    HStack(alignment: .top, spacing: 20) {
-                        previewPane.frame(width: 640, height: 480)
-                        infoPanel.frame(maxWidth: .infinity, minHeight: 480, maxHeight: 480)
-                    }
+            if theme.guideLayout == .timeline {
+                timelineHeader
+                timelineGrid
+            } else {
+                ZStack {
+                    browseHome
+                        .disabled(showingFullGuide)
+                        .allowsHitTesting(!showingFullGuide)
+                        .accessibilityHidden(showingFullGuide)
+                        .opacity(showingFullGuide ? 0 : 1)
+                    if showingFullGuide { fullGuide }
                 }
             }
-            .focusSection()
-
-            // Bottom section: 3-hour time grid
-            GuideGrid(
-                selectedChannel: $selectedChannel,
-                inspectedBlock: $inspectedBlock,
-                windowStartMs: $windowStartMs,
-                focusIntent: $focusIntent,
-                focus: $focus,
-                onWatch: watch
-            )
-            .frame(maxHeight: .infinity)
-            .focusSection()
         }
         // tvOS title-safe margins (80 pt left/right, 60 pt top/bottom). Height at 1080:
         // 60 + 480 (top) + 12 + 468 (grid: 50 header + 418 rows) + 60 = 1080.
@@ -85,7 +76,7 @@ struct GuideHome: View {
         .background(theme.screenBackground.ignoresSafeArea())
         .cableScanlines()
         .onPlayPauseCommand {
-            if presentation == nil, focusAfterDismissal == nil { focusLiveProgram() }
+            if presentation == nil, focusAfterDismissal == nil { focusLiveProgram(preferLiveProgram: true) }
         }
         .onAppear {
             // A cover can hide and reveal this guide without replacing its state.
@@ -97,9 +88,29 @@ struct GuideHome: View {
             } else if let current = activeChannel {
                 schedulePreviewTune(for: current, immediate: store.tv.channel == nil)
             }
-            // Start on the grid: the cell airing now on the current / last-watched channel.
-            if let current = activeChannel, current.isWatchable {
-                focusIntent = GuideGrid.FocusIntent(channelID: current.id, atMs: Date.nowMs)
+            focusLiveProgram()
+        }
+        .onChange(of: theme.guideLayout) { _, _ in
+            showingFullGuide = false
+            focusIntent = nil
+            browseFocusRequest = nil
+            lastBrowseFocus = nil
+            if let channel = activeChannel {
+                schedulePreviewTune(for: channel, immediate: true)
+            }
+        }
+        .onChange(of: focus) { _, target in
+            guard presentation == nil, let target else { return }
+            let id: String
+            switch target {
+            case .browseChannel(let channelID), .browseUpcoming(let channelID, _), .browseSchedule(let channelID, _):
+                id = channelID
+            default:
+                return
+            }
+            lastBrowseFocus = target
+            if selectedChannel?.id != id, let channel = store.channels.first(where: { $0.id == id }) {
+                selectedChannel = channel
             }
         }
         .onChange(of: selectedChannel?.id) { _, _ in
@@ -110,8 +121,8 @@ struct GuideHome: View {
         .onDisappear {
             if presentation == nil { previewDebounceTask?.cancel() }
         }
-        .task(id: activeChannel.map(DetailsRequest.init)) {
-            if let ch = activeChannel {
+        .task(id: theme.guideLayout == .timeline ? activeChannel.map(DetailsRequest.init) : nil) {
+            if theme.guideLayout == .timeline, let ch = activeChannel {
                 await store.ensureDetails(for: ch)
             }
         }
@@ -125,12 +136,145 @@ struct GuideHome: View {
                 } onClose: {
                     presentation = nil
                 }
+            case .program(let channel, let entry):
+                programDetails(channel, entry: entry)
             case .themePicker:
                 ThemePicker {
                     presentation = nil
                 }
             }
         }
+    }
+
+    private var timelineHeader: some View {
+        Group {
+            if theme.usesCableLayout {
+                cableGuideHeader
+            } else {
+                HStack(alignment: .top, spacing: 20) {
+                    previewPane.frame(width: 640, height: 480)
+                    infoPanel.frame(maxWidth: .infinity, minHeight: 480, maxHeight: 480)
+                }
+            }
+        }
+        .focusSection()
+    }
+
+    private var timelineGrid: some View {
+        GuideGrid(
+            selectedChannel: $selectedChannel,
+            inspectedBlock: $inspectedBlock,
+            windowStartMs: $windowStartMs,
+            focusIntent: $focusIntent,
+            focus: $focus,
+            onWatch: watch
+        )
+        .frame(maxHeight: .infinity)
+        .focusSection()
+    }
+
+    private var browseHome: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 24) {
+                Text(theme.name)
+                    .font(theme.heading(38))
+                    .foregroundStyle(theme.primaryText)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                browseButton("Full Guide", target: .fullGuide) {
+                    browseFocusRequest = nil
+                    channelBeforeFullGuide = activeChannel
+                    showingFullGuide = true
+                    requestGridFocus()
+                }
+                browseButton("Theme Mode", target: .themeMode) {
+                    present(.themePicker, returningTo: .themeMode)
+                }
+            }
+            .focusSection()
+            ThemeBrowseView(
+                channels: store.channels,
+                selectedChannel: showingFullGuide ? (channelBeforeFullGuide ?? activeChannel) : activeChannel,
+                focus: $focus,
+                focusRequest: $browseFocusRequest, preview: { previewPicture }, onWatch: watch,
+                onInspect: { channel, entry in
+                    present(.program(channel, entry), returningTo: focus ?? .browseChannel(channel.id))
+                }
+            )
+        }
+    }
+
+    private var fullGuide: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 24) {
+                VStack(alignment: .leading) {
+                    Text("Full Guide").font(theme.heading(46))
+                    if let channel = activeChannel {
+                        Text(inspectedBlock?.title ?? channel.name).font(theme.body(30))
+                    }
+                    if let block = inspectedBlock {
+                        Text("\(Theme.formatTime12(block.startMs)) – \(Theme.formatTime12(block.endMs))")
+                            .font(theme.time(24))
+                            .foregroundStyle(theme.mutedText)
+                    }
+                }
+                Spacer()
+                if let channel = activeChannel {
+                    browseButton("Watch Live", target: .watch) { watch(channel) }
+                        .disabled(!channel.isWatchable)
+                        .onMoveCommand(perform: enterGrid)
+                }
+                browseButton("Back to Browse", target: .backToBrowse, action: closeFullGuide)
+            }
+            .foregroundStyle(theme.primaryText)
+            .focusSection()
+            timelineGrid
+        }
+        .onExitCommand(perform: closeFullGuide)
+    }
+
+    private func closeFullGuide() {
+        showingFullGuide = false
+        focusIntent = nil
+        inspectedBlock = nil
+        if let channel = channelBeforeFullGuide { selectedChannel = channel }
+        channelBeforeFullGuide = nil
+        if let target = lastBrowseFocus ?? activeChannel.map({ GuideFocus.browseChannel($0.id) }) {
+            browseFocusRequest = BrowseFocusRequest(target: target)
+        } else {
+            focus = .fullGuide
+        }
+    }
+
+    private func browseButton(_ title: String, target: GuideFocus, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(theme.button(28)).foregroundStyle(theme.primaryText)
+        }
+        .buttonStyle(SpelunkrActionButtonStyle(background: AnyShapeStyle(theme.raisedSurface)))
+        .focused($focus, equals: target)
+    }
+
+    private func programDetails(_ channel: ChannelInfo, entry: GuideEntry) -> some View {
+        let _ = store.detailsRevision
+        return VStack(alignment: .leading, spacing: 24) {
+            Text("CH \(channel.dialText) · \(channel.name)").font(theme.label(32))
+            Text(entry.title).font(theme.heading(56))
+            HStack(spacing: 18) {
+                Text("\(Theme.formatTime12(entry.startMs)) – \(Theme.formatTime12(entry.endMs))")
+                if let year = entry.year, !year.isEmpty { Text(year) }
+            }
+            .font(theme.time(34))
+            if let blurb = store.detail(channelID: channel.id, version: entry.version, videoIndex: entry.videoIndex)?.description {
+                Text(blurb).font(theme.body(32)).lineLimit(6)
+            }
+            GuideBackButton { presentation = nil }
+        }
+        .foregroundStyle(theme.primaryText)
+        .padding(80)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background(theme.screenBackground.ignoresSafeArea())
+        .onExitCommand { presentation = nil }
+        .task(id: DetailsRequest(channel)) { await store.ensureDetails(for: channel) }
     }
 
     // MARK: - Top Left: Live Preview
@@ -589,7 +733,12 @@ struct GuideHome: View {
     private func restoreGuideFocus() {
         guard let control = focusAfterDismissal else { return }
         focusAfterDismissal = nil
-        focus = control
+        switch control {
+        case .browseChannel, .browseSchedule, .browseUpcoming:
+            browseFocusRequest = BrowseFocusRequest(target: control)
+        default:
+            focus = control
+        }
     }
 
     /// Thin rule between info panel sections.
@@ -609,6 +758,16 @@ struct GuideHome: View {
 
     private func schedulePreviewTune(for channel: ChannelInfo, immediate: Bool) {
         previewDebounceTask?.cancel()
+        switch theme.guideLayout {
+        case .timeline, .daylight, .cinema, .channelWall:
+            break
+        case .scheduleDesk, .largePrint, .spotlight:
+            if store.tv.channel != nil {
+                store.tv.stop()
+                store.presence.track(channelID: nil)
+            }
+            return
+        }
         guard channel.isWatchable else { return }
         if store.tv.channel?.id == channel.id {
             store.presence.track(channelID: channel.id)
@@ -629,7 +788,18 @@ struct GuideHome: View {
         if direction == .down { focusLiveProgram() }
     }
 
-    private func focusLiveProgram() {
+    private func focusLiveProgram(preferLiveProgram: Bool = false) {
+        if theme.guideLayout == .timeline || showingFullGuide {
+            requestGridFocus()
+        } else if let channel = activeChannel {
+            browseFocusRequest = BrowseFocusRequest(
+                target: .browseChannel(channel.id),
+                preferLiveProgram: preferLiveProgram
+            )
+        }
+    }
+
+    private func requestGridFocus() {
         guard let channel = activeChannel, channel.isWatchable else { return }
         let nowMs = Date.nowMs
         windowStartMs = GuideGrid.currentHalfHourMs(from: nowMs)

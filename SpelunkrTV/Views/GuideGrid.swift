@@ -7,6 +7,11 @@ enum GuideFocus: Hashable {
     case watch
     case viewChannel
     case themeMode
+    case browseChannel(String)
+    case browseUpcoming(String, Double)
+    case browseSchedule(String, String)
+    case fullGuide
+    case backToBrowse
     case cell(GuideGrid.GridCellID)
 }
 
