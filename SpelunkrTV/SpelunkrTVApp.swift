@@ -13,23 +13,36 @@ struct SpelunkrTVApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
-                .environment(store)
-                .preferredColorScheme(.dark)
-                .onChange(of: scenePhase) { _, phase in
-                    switch phase {
-                    case .active:
-                        store.presence.connect()
-                        if let id = store.tv.channel?.id {
-                            store.presence.track(channelID: id)
-                        }
-                    case .background:
-                        store.presence.disconnect()
-                    default:
-                        break
-                    }
-                }
+            #if DEBUG
+            if let request = StreamingHandoffProbe.launchRequest {
+                StreamingHandoffProbe(request: request)
+                    .preferredColorScheme(.dark)
+            } else {
+                broadcastView
+            }
+            #else
+            broadcastView
+            #endif
         }
+    }
+
+    private var broadcastView: some View {
+        RootView()
+            .environment(store)
+            .preferredColorScheme(.dark)
+            .onChange(of: scenePhase) { _, phase in
+                switch phase {
+                case .active:
+                    store.presence.connect()
+                    if let id = store.tv.channel?.id {
+                        store.presence.track(channelID: id)
+                    }
+                case .background:
+                    store.presence.disconnect()
+                default:
+                    break
+                }
+            }
     }
 }
 
