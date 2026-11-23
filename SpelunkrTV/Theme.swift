@@ -183,10 +183,12 @@ private struct SpelunkrActionButtonBody: View {
         configuration.label
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
-            .background(background)
+            // ignoresSafeAreaEdges: [] keeps the fill inside the button (the default lets a
+            // ShapeStyle background bleed into the safe area, which showed as a stray block).
+            .background(background, ignoresSafeAreaEdges: [])
             .overlay(
                 Rectangle()
-                    .stroke(isFocused ? Theme.yellow : restingBorder, lineWidth: isFocused ? 4 : 2)
+                    .strokeBorder(isFocused ? Theme.yellow : restingBorder, lineWidth: isFocused ? 4 : 2)
             )
             .brightness(isFocused ? 0.12 : 0)
             .scaleEffect(configuration.isPressed ? 0.96 : (isFocused ? 1.04 : 1.0))
@@ -212,16 +214,16 @@ struct SpelunkrPanel<Content: View>: View {
 
     var body: some View {
         content()
-            .background(Theme.panelGradient)
+            .background(Theme.panelGradient, ignoresSafeAreaEdges: [])
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius)
-                    .stroke(borderColor, lineWidth: 2)
+                    .strokeBorder(borderColor, lineWidth: 4)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: max(0, cornerRadius - 1))
-                    .stroke(Theme.ringInner, lineWidth: 2)
-                    .padding(2)
+                    .strokeBorder(Theme.ringInner, lineWidth: 2)
+                    .padding(4)
             )
     }
 }
@@ -231,8 +233,15 @@ struct SpelunkrProgressBar: View {
     let elapsedText: String
     let remainingText: String
 
+    /// Elapsed time, bar and remaining time on one row, like the web info panel.
     var body: some View {
-        VStack(spacing: 5) {
+        HStack(spacing: 14) {
+            Text(elapsedText)
+                .font(Theme.label(24))
+                .foregroundStyle(Theme.softText)
+                .lineLimit(1)
+                .fixedSize()
+
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Rectangle()
@@ -243,17 +252,13 @@ struct SpelunkrProgressBar: View {
                 }
                 .overlay(Rectangle().stroke(Theme.borderLight.opacity(0.75), lineWidth: 1))
             }
-            .frame(height: 13)
+            .frame(height: 14)
 
-            HStack {
-                Text(elapsedText)
-                    .font(Theme.label(18))
-                    .foregroundStyle(Theme.softText)
-                Spacer()
-                Text(remainingText)
-                    .font(Theme.label(18))
-                    .foregroundStyle(Theme.blueMuted)
-            }
+            Text(remainingText)
+                .font(Theme.label(24))
+                .foregroundStyle(Theme.softText)
+                .lineLimit(1)
+                .fixedSize()
         }
     }
 }
@@ -261,7 +266,7 @@ struct SpelunkrProgressBar: View {
 struct ViewerBadge: View {
     let count: Int
     var suffix: String? = nil
-    var fontSize: CGFloat = 17
+    var fontSize: CGFloat = 23
     var color: Color = Theme.softText
 
     var body: some View {
@@ -281,13 +286,13 @@ struct FamilyBadge: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "square.inset.filled")
-                .font(.system(size: 13, weight: .bold))
+                .font(.system(size: 17, weight: .bold))
             Text(family.replacingOccurrences(of: "-", with: " ").uppercased())
-                .font(Theme.label(16))
+                .font(Theme.label(21))
         }
         .foregroundStyle(Theme.cyan)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
         .background(Theme.deepNavy.opacity(0.85))
         .overlay(Rectangle().stroke(Theme.cyan.opacity(0.55), lineWidth: 1))
     }
@@ -298,13 +303,13 @@ struct LiveBadge: View {
         HStack(spacing: 6) {
             Circle()
                 .fill(Theme.liveRed)
-                .frame(width: 9, height: 9)
+                .frame(width: 12, height: 12)
             Text("LIVE")
-                .font(Theme.label(16))
+                .font(Theme.label(21))
                 .foregroundStyle(.white)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 3)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
         .background(Theme.deepNavy.opacity(0.9))
         .overlay(Rectangle().stroke(Theme.liveRed.opacity(0.8), lineWidth: 1))
     }

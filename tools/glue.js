@@ -1,5 +1,5 @@
 
-// ---- Spelunkr TV glue (written for the Apple TV app, not part of spelunkr.tv) ----
+// ---- spelunkrtv-apple-tv glue for the Apple TV app ----
 // SPK_RB / SPK_ZO / SPK_FN are set by update-engine.mjs to the site's own
 // "new channel", "add version" and "what's on at time t" functions.
 function spkPresenceConfig() {

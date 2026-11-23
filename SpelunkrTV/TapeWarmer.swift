@@ -11,6 +11,11 @@ import Foundation
 final class TapeWarmer {
     static let capacity = 3
     static let warmTimeout: Double = 60
+    /// Tapes whose moov atom is larger than this are not warmed speculatively (with a direct address a
+    /// 20 to 30 MB header parses in a few seconds; beyond this it competes with the tape being watched).
+    static let maxWarmMoov = 40_000_000
+    /// How many storage-server lookups the background pre-resolve runs at once (each is two small requests).
+    private static let prefetchConcurrency = 3
     private static let staleAfter: TimeInterval = 600
     private static let serverTTL: TimeInterval = 1800
     private static let serverFailureTTL: TimeInterval = 120
@@ -20,9 +25,14 @@ final class TapeWarmer {
         let dir: String
     }
 
+    struct Target {
+        let canonical: URL
+        let moov: Int?
+    }
+
     /// A warmed asset handed to the player. `ready` is true once its header has been parsed.
     struct Taken {
-        let asset: AVURLAsset
+        let tape: TapeLoader.Tape
         let ready: Bool
     }
 
@@ -30,7 +40,8 @@ final class TapeWarmer {
         let key: String
         let canonical: URL
         let created = Date()
-        var asset: AVURLAsset?
+        var startedMs: Double = Date.nowMs
+        var tape: TapeLoader.Tape?
         var loaded = false
         var lastUsed = 0
         var task: Task<Void, Never>?
@@ -43,6 +54,7 @@ final class TapeWarmer {
     private var tick = 0
     private var servers: [String: (server: Server?, at: Date)] = [:]
     private var lookups: [String: Task<Server?, Never>] = [:]
+    private var prefetchTask: Task<Void, Never>?
 
     // MARK: - Using the cache
 
@@ -51,16 +63,35 @@ final class TapeWarmer {
     /// item joins that load instead of starting a second one.
     func take(_ canonical: URL) -> Taken? {
         let key = canonical.absoluteString
-        guard let entry = entries.removeValue(forKey: key) else { return nil }
+        guard let entry = entries.removeValue(forKey: key) else {
+            TuneLog.info("[warmer] take miss (not in cache): \(TuneLog.short(canonical)); cached: \(entries.values.map { TuneLog.short($0.canonical) }.joined(separator: ", "))")
+            return nil
+        }
         entry.watchdog?.cancel()
-        guard let asset = entry.asset, Date().timeIntervalSince(entry.created) < Self.staleAfter else {
+        guard let tape = entry.tape, Date().timeIntervalSince(entry.created) < Self.staleAfter else {
+            TuneLog.info("[warmer] take dropped (no asset yet or stale): \(TuneLog.short(canonical))")
             // Still looking up the server (nothing to join) or too old: drop it.
             entry.task?.cancel()
-            entry.asset?.cancelLoading()
+            entry.tape?.asset.cancelLoading()
             return nil
         }
         // The warm task is left to finish by itself: it finds the entry gone and does nothing.
-        return Taken(asset: asset, ready: entry.loaded)
+        TuneLog.info("[warmer] take hit: \(TuneLog.short(canonical)) loaded=\(entry.loaded) age=\(Int(Date().timeIntervalSince(entry.created)))s")
+        return Taken(tape: tape, ready: entry.loaded)
+    }
+
+    /// Takes back the parsed asset of a tape the player is leaving, so tuning straight back is a warm tune.
+    func keep(_ tape: TapeLoader.Tape, canonical: URL) {
+        let key = canonical.absoluteString
+        guard entries[key] == nil else { return }
+        makeRoom()
+        let entry = Entry(key: key, canonical: canonical)
+        entry.tape = tape
+        entry.loaded = true
+        tick += 1
+        entry.lastUsed = tick
+        entries[key] = entry
+        TuneLog.info("[warmer] kept departing asset: \(TuneLog.short(canonical))")
     }
 
     /// The direct storage address for a tape, if a warm already found its server. Never does any I/O.
@@ -69,6 +100,105 @@ final class TapeWarmer {
               let cached = servers[id], let server = cached.server,
               Date().timeIntervalSince(cached.at) < Self.serverTTL else { return nil }
         return Self.directURL(server: server, file: file)
+    }
+
+    /// Where a tune's direct address came from, for the tune log.
+    enum DirectSource: Sendable {
+        case cached
+        case resolved(ms: Int)
+        case fallback(String)
+
+        var description: String {
+            switch self {
+            case .cached: return "cached"
+            case .resolved(let ms): return "resolved now in \(ms)ms"
+            case .fallback(let why): return "fallback to redirect (\(why))"
+            }
+        }
+        var isDirect: Bool {
+            if case .fallback = self { return false }
+            return true
+        }
+    }
+
+    /// The direct storage address for a tape: from the cache if known, otherwise looked up now,
+    /// waiting at most `timeout` seconds. nil (with the reason) means: load archive.org/download.
+    /// A lookup that outlives the timeout carries on in the background and fills the cache.
+    func resolveDirectURL(for canonical: URL, timeout: Double) async -> (url: URL?, source: DirectSource) {
+        guard let (id, file) = Self.parts(of: canonical) else { return (nil, .fallback("unparsable address")) }
+        let began = Date.nowMs
+        if let cached = servers[id], Date().timeIntervalSince(cached.at) < (cached.server == nil ? Self.serverFailureTTL : Self.serverTTL) {
+            guard let server = cached.server, let url = Self.directURL(server: server, file: file) else {
+                return (nil, .fallback("lookup failed recently"))
+            }
+            return (url, .cached)
+        }
+        let lookup = lookupTask(for: id)
+        // Not a task group: awaiting a Task's value ignores cancellation, so a group would wait for the whole lookup.
+        let server: Server? = await withCheckedContinuation { (continuation: CheckedContinuation<Server?, Never>) in
+            let once = Once()
+            Task { @MainActor in
+                let result = await lookup.value
+                if once.finish() { continuation.resume(returning: result) }
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(timeout))
+                if once.finish() { continuation.resume(returning: nil) }
+            }
+        }
+        guard !Task.isCancelled else { return (nil, .fallback("cancelled")) }
+        guard let server, let url = Self.directURL(server: server, file: file) else {
+            let waited = Int(Date.nowMs - began)
+            return (nil, .fallback(waited >= Int(timeout * 1000) - 50 ? "lookup timed out after \(waited)ms" : "lookup failed after \(waited)ms"))
+        }
+        return (url, .resolved(ms: Int(Date.nowMs - began)))
+    }
+
+    /// Lets exactly one of two racing tasks resume a continuation.
+    @MainActor private final class Once {
+        private var done = false
+        func finish() -> Bool {
+            if done { return false }
+            done = true
+            return true
+        }
+    }
+
+    /// Looks up the storage servers of these items in the background (a few at a time), skipping ids that
+    /// are already known or already being looked up. Never blocks anything; a newer call replaces the
+    /// queue of an older one, but lookups already under way finish and are cached either way.
+    func prefetchServers(forIDs ids: [String]) {
+        var seen = Set<String>()
+        let todo = ids.filter { id in
+            guard seen.insert(id).inserted else { return false }
+            if let cached = servers[id], Date().timeIntervalSince(cached.at) < (cached.server == nil ? Self.serverFailureTTL : Self.serverTTL) { return false }
+            return true
+        }
+        guard !todo.isEmpty else { return }
+        TuneLog.info("[warmer] pre-resolving \(todo.count) storage servers")
+        prefetchTask?.cancel()
+        prefetchTask = Task { [weak self] in
+            guard let warmer = self else { return }
+            let began = Date.nowMs
+            var found = 0
+            await withTaskGroup(of: Bool.self) { group in
+                var iterator = todo.makeIterator()
+                var running = 0
+                while running < Self.prefetchConcurrency, let id = iterator.next() {
+                    group.addTask { await warmer.server(for: id) != nil }
+                    running += 1
+                }
+                while let ok = await group.next() {
+                    if ok { found += 1 }
+                    if !Task.isCancelled, let id = iterator.next() {
+                        group.addTask { await warmer.server(for: id) != nil }
+                    }
+                }
+            }
+            if !Task.isCancelled {
+                TuneLog.info("[warmer] pre-resolved \(found)/\(todo.count) storage servers in \(Int(Date.nowMs - began))ms")
+            }
+        }
     }
 
     /// Called when a direct address didn't work: use archive.org/download for this item for a while.
@@ -82,25 +212,28 @@ final class TapeWarmer {
     /// Warms these addresses (most important first; at most `capacity`), and stops warming
     /// anything that is still loading and no longer wanted. Finished warms that are no longer
     /// wanted stay until the LRU needs the room.
-    func setWanted(_ urls: [URL]) {
-        let list = Array(urls.prefix(Self.capacity))
-        wanted = Set(list.map(\.absoluteString))
+    func setWanted(_ targets: [Target]) {
+        let list = Array(targets.prefix(Self.capacity))
+        wanted = Set(list.map { $0.canonical.absoluteString })
+        TuneLog.info("[warmer] wanted: \(list.map { TuneLog.short($0.canonical) }.joined(separator: ", "))")
         for entry in Array(entries.values) where !wanted.contains(entry.key) && !entry.loaded {
             evict(entry)
         }
-        for url in list {
-            let key = url.absoluteString
+        for target in list {
+            let key = target.canonical.absoluteString
             if let existing = entries[key] {
                 tick += 1
                 existing.lastUsed = tick
                 continue
             }
-            start(url, key: key)
+            start(target, key: key)
         }
     }
 
     /// Stops every warm that has not finished, so nothing competes with a tape being tuned.
     func cancelPending() {
+        let pending = entries.values.filter { !$0.loaded }
+        if !pending.isEmpty { TuneLog.info("[warmer] cancelPending: \(pending.count) in flight") }
         for entry in Array(entries.values) where !entry.loaded { evict(entry) }
     }
 
@@ -108,19 +241,21 @@ final class TapeWarmer {
     func cancelAll() {
         for entry in Array(entries.values) { evict(entry) }
         wanted = []
-        for task in lookups.values { task.cancel() }
-        lookups = [:]
+        // Server lookups in flight are left to finish (they are tiny and fill the cache); only the queue stops.
+        prefetchTask?.cancel(); prefetchTask = nil
     }
 
     // MARK: - Warming one tape
 
-    private func start(_ url: URL, key: String) {
+    private func start(_ target: Target, key: String) {
         makeRoom()
+        let url = target.canonical
         let entry = Entry(key: key, canonical: url)
+        TuneLog.info("[warmer] start: \(TuneLog.short(url))")
         tick += 1
         entry.lastUsed = tick
         entries[key] = entry
-        entry.task = Task { [weak self] in await self?.warm(entry) }
+        entry.task = Task { [weak self] in await self?.warm(entry, moov: target.moov) }
         entry.watchdog = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.warmTimeout))
             guard !Task.isCancelled, let self else { return }
@@ -128,22 +263,26 @@ final class TapeWarmer {
         }
     }
 
-    private func warm(_ entry: Entry) async {
+    private func warm(_ entry: Entry, moov: Int?) async {
         guard let (id, file) = Self.parts(of: entry.canonical) else { evict(entry); return }
         var loadURL = entry.canonical
-        if let server = await server(for: id), let direct = Self.directURL(server: server, file: file) {
+        let serverFound = await server(for: id)
+        if let server = serverFound, let direct = Self.directURL(server: server, file: file) {
             loadURL = direct
         }
+        TuneLog.info("[warmer] metadata lookup \(serverFound == nil ? "failed/none" : "ok") after \(Int(Date.nowMs - entry.startedMs))ms: \(TuneLog.short(entry.canonical))")
         guard !Task.isCancelled, entries[entry.key] === entry else { return }
 
-        let asset = AVURLAsset(url: loadURL)
-        entry.asset = asset
         let playable: Bool
         do {
+            let tape = try await TapeLoader.prepare(canonical: entry.canonical, url: loadURL, moov: moov)
+            guard !Task.isCancelled, entries[entry.key] === entry else { return }
+            entry.tape = tape
             // Parses the moov atom now, so a player item made from this asset is ready almost at once.
-            let loaded = try await asset.load(.isPlayable, .duration, .tracks)
+            let loaded = try await tape.asset.load(.isPlayable, .duration, .tracks)
             playable = loaded.0
         } catch {
+            TuneLog.info("[warmer] header load failed after \(Int(Date.nowMs - entry.startedMs))ms: \(TuneLog.short(entry.canonical)) \(error.localizedDescription)")
             if entries[entry.key] === entry { evict(entry) }
             return
         }
@@ -151,13 +290,17 @@ final class TapeWarmer {
         guard playable else { evict(entry); return }
         entry.loaded = true
         entry.watchdog?.cancel()
+        TuneLog.info("[warmer] finished (header parsed) in \(Int(Date.nowMs - entry.startedMs))ms: \(TuneLog.short(entry.canonical))")
     }
 
     private func evict(_ entry: Entry) {
-        if entries[entry.key] === entry { entries[entry.key] = nil }
+        if entries[entry.key] === entry {
+            entries[entry.key] = nil
+            TuneLog.info("[warmer] evict (loaded=\(entry.loaded)): \(TuneLog.short(entry.canonical))")
+        }
         entry.task?.cancel()
         entry.watchdog?.cancel()
-        entry.asset?.cancelLoading()
+        entry.tape?.asset.cancelLoading()
     }
 
     /// Least recently used first, but anything no longer wanted goes before anything still wanted.
@@ -177,46 +320,46 @@ final class TapeWarmer {
             let ttl = cached.server == nil ? Self.serverFailureTTL : Self.serverTTL
             if Date().timeIntervalSince(cached.at) < ttl { return cached.server }
         }
-        let task: Task<Server?, Never>
-        if let running = lookups[id] {
-            task = running
-        } else {
-            task = Task { await Self.fetchServer(id: id) }
-            lookups[id] = task
-        }
-        let result = await task.value
-        if !task.isCancelled {
-            lookups[id] = nil
-            servers[id] = (result, Date())
-        }
-        return result
+        return await lookupTask(for: id).value
     }
 
-    /// archive.org/metadata/<id>: only "d1" (storage host) and "dir" are needed. Gives up after 8 s.
+    /// The (shared) lookup for one item. It records its own result, so a caller that stops waiting
+    /// early (a tune's short timeout) does not lose it.
+    private func lookupTask(for id: String) -> Task<Server?, Never> {
+        if let running = lookups[id] { return running }
+        let task = Task { [weak self] () -> Server? in
+            let result = await Self.fetchServer(id: id)
+            if let self, !Task.isCancelled {
+                self.servers[id] = (result, Date())
+                self.lookups[id] = nil
+            }
+            return result
+        }
+        lookups[id] = task
+        return task
+    }
+
+    /// archive.org/metadata/<id>/d1 and /dir (a few dozen bytes each, unlike the full metadata, which can
+    /// be hundreds of KB), fetched in parallel. Gives up after 6 s.
     nonisolated private static func fetchServer(id: String) async -> Server? {
-        await withTaskGroup(of: Server?.self) { group in
-            group.addTask {
-                guard let url = URL(string: "https://archive.org/metadata/\(id)") else { return nil }
-                var request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 8)
-                request.setValue("SpelunkrTV/0.1 (tvOS)", forHTTPHeaderField: "User-Agent")
-                guard let (data, response) = try? await URLSession.shared.data(for: request),
-                      (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
-                      let meta = try? JSONDecoder().decode(Metadata.self, from: data) else { return nil }
-                return validate(d1: meta.d1, dir: meta.dir)
-            }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(8))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
-        }
+        async let d1 = fetchResult(id: id, field: "d1")
+        async let dir = fetchResult(id: id, field: "dir")
+        return validate(d1: await d1, dir: await dir)
     }
 
-    private struct Metadata: Decodable {
-        let d1: String?
-        let dir: String?
+    nonisolated private static func fetchResult(id: String, field: String) async -> String? {
+        guard let url = URL(string: "https://archive.org/metadata/\(ArchiveMedia.encodeComponent(id))/\(field)") else { return nil }
+        var request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 6)
+        request.setValue("SpelunkrTV/0.1 (tvOS)", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
+              let reply = try? JSONDecoder().decode(Reply.self, from: data) else { return nil }
+        return reply.result
+    }
+
+    /// {"result": "..."}, or {"error": "..."} for an item without that field.
+    private struct Reply: Decodable {
+        let result: String?
     }
 
     /// The host must look like a name under archive.org and the directory must be an absolute path.

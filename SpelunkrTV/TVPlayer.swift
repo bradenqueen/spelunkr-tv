@@ -2,6 +2,7 @@ import AVFoundation
 import Combine
 import CoreGraphics
 import Observation
+import os
 
 /// Plays whatever is on air on one channel, and keeps it pinned to the broadcast clock.
 @MainActor
@@ -36,14 +37,12 @@ final class TVPlayer {
     @ObservationIgnored private var boundaryTask: Task<Void, Never>?
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
     @ObservationIgnored private var lastCorrectionMs: Double = 0
-    @ObservationIgnored private var seekLag: Double = 0.5
-    /// Typical seconds from starting a tune to the tape actually playing: a cold load, and one from a warmed asset.
-    @ObservationIgnored private var coldStartLag: Double = 2.0
-    @ObservationIgnored private var warmStartLag: Double = 0.8
+    @ObservationIgnored private var seekLag: Double = 0.8
     private let warmer = TapeWarmer()
     @ObservationIgnored private var warmTask: Task<Void, Never>?
     @ObservationIgnored private var warmLeadTask: Task<Void, Never>?
     @ObservationIgnored private var tapeURL: URL?
+    @ObservationIgnored private var currentTape: TapeLoader.Tape?
     @ObservationIgnored private var overlayTask: Task<Void, Never>?
     @ObservationIgnored private var overlayBoundaryTask: Task<Void, Never>?
     @ObservationIgnored private var overlayCue: OverlayCue?
@@ -55,6 +54,8 @@ final class TVPlayer {
     @ObservationIgnored private var fullscreen = false
     @ObservationIgnored private var displayTask: Task<Void, Never>?
     @ObservationIgnored private var endObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private var tuneStartMs: Double = 0
+    @ObservationIgnored private var tuneSignpost: OSSignpostIntervalState?
 
     init() {
         video.automaticallyWaitsToMinimizeStalling = true
@@ -65,7 +66,16 @@ final class TVPlayer {
     // MARK: - Control
 
     func tune(_ ch: ChannelInfo) {
+        // Leaving a tape that is playing: keep its parsed asset, so coming straight back is a warm tune.
+        if let old = channel, old.id != ch.id, case .playing = phase, let url = tapeURL,
+           let currentTape {
+            warmer.keep(currentTape, canonical: url)
+        }
+        endTuneSignpost()
+        tuneStartMs = Date.nowMs
+        tuneSignpost = TuneLog.signposter.beginInterval("tune", id: TuneLog.signposter.makeSignpostID())
         channel = ch
+        tlog("tune requested (was \(previousDescription()))")
         onAir = nil
         phase = .tuning
         silenceTape(resetDisplay: false)
@@ -78,6 +88,8 @@ final class TVPlayer {
     }
 
     func stop() {
+        tlog("stop")
+        endTuneSignpost()
         tuneTask?.cancel(); tuneTask = nil
         boundaryTask?.cancel(); boundaryTask = nil
         monitorTask?.cancel(); monitorTask = nil
@@ -91,16 +103,55 @@ final class TVPlayer {
         isBuffering = false
     }
 
+    // MARK: - Tune log
+
+    /// One timeline line: channel id and milliseconds since the tune was requested.
+    private func tlog(_ message: String) {
+        let ms = Int(Date.nowMs - tuneStartMs)
+        TuneLog.info("[\(channel?.id ?? "-") +\(ms)ms] \(message)")
+    }
+
+    private func previousDescription() -> String {
+        guard let old = channel else { return "idle" }
+        return "\(old.id) \(phase)"
+    }
+
+    private func endTuneSignpost() {
+        guard let state = tuneSignpost else { return }
+        TuneLog.signposter.endInterval("tune", state)
+        tuneSignpost = nil
+    }
+
+    private static func describe(_ status: AVPlayer.TimeControlStatus) -> String {
+        switch status {
+        case .paused: return "paused"
+        case .waitingToPlayAtSpecifiedRate: return "waiting"
+        case .playing: return "playing"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private static func describe(_ status: AVPlayerItem.Status) -> String {
+        switch status {
+        case .unknown: return "unknown"
+        case .readyToPlay: return "readyToPlay"
+        case .failed: return "failed"
+        @unknown default: return "?"
+        }
+    }
+
     // MARK: - Playback
 
     private func playCurrent() async {
         guard let ch = channel, let store, let engine = store.engine else { return }
         let found = await engine.onAir(channel: ch.id, atMs: Date.nowMs)
         guard !Task.isCancelled, channel?.id == ch.id else { return }
+        tlog("engine lookup done: \(found.map { "\($0.type) \($0.id ?? "-")" } ?? "nothing on air")")
         guard let item = found else {
             silenceTape()
             warmer.cancelPending()
             phase = .problem("Nothing is scheduled on this channel right now.")
+            endTuneSignpost()
             scheduleBoundary(atMs: Date.nowMs + 30_000)
             return
         }
@@ -116,6 +167,8 @@ final class TVPlayer {
             clearPicture()
             stopOverlay()
             phase = .card
+            tlog("card on screen")
+            endTuneSignpost()
             scheduleWarms()
             await playMusic(for: item, base: store.audioBase)
             return
@@ -135,6 +188,7 @@ final class TVPlayer {
                 stopOverlay()
                 if ch.audioOverlay == true { tapeVolume = 0 }
             }
+            tlog("overlay lookup done: \(overlayCue == nil ? "none" : "music")")
         } else {
             stopOverlay()
         }
@@ -142,104 +196,120 @@ final class TVPlayer {
             guard !Task.isCancelled else { return }
             silenceTape()
             phase = .problem("This tape is missing from the Internet Archive. The next show starts at \(formatClock(item.endMs)).")
+            endTuneSignpost()
             return
         }
         guard !Task.isCancelled else { return }
 
-        // Use a warmed asset if there is one (its header is already parsed); otherwise load the direct
-        // storage address if an earlier warm found it, else archive.org/download. `url` stays the
-        // canonical address: it is what the picture-fix lookup is keyed on.
+        // Keep the canonical URL for caching and picture fixes; only the loader uses the storage URL.
         let warmed = warmer.take(url)
-        warmer.cancelPending()   // nothing else may compete with this tape
-        var asset = warmed?.asset ?? AVURLAsset(url: warmer.directURL(for: url) ?? url)
-        var usedDirect = asset.url != url
-        var wasWarm = warmed?.ready ?? false
+        if warmed == nil { warmer.cancelPending() }
+        var tape: TapeLoader.Tape
+        var source: String
+        if let warmed {
+            tape = warmed.tape
+            source = "warmed asset"
+        } else {
+            let resolved = await warmer.resolveDirectURL(for: url, timeout: 1.5)
+            guard !Task.isCancelled, channel?.id == ch.id else { return }
+            tlog("preparing tape [\(resolved.source.description)]; \(TuneLog.short(url)); moov \(item.moov.map { "\($0)" } ?? "?")")
+            guard let prepared = try? await TapeLoader.prepare(canonical: url, url: resolved.url ?? url, moov: item.moov),
+                  !Task.isCancelled, channel?.id == ch.id else { return }
+            tape = prepared
+            source = resolved.source.description
+        }
+        var usedDirect = tape.url != url
+        source += tape.usesRanges ? ", range loader" : ", AVFoundation"
+        let wasWarm = warmed?.ready ?? false
+        tlog("\(warmed == nil ? "warm miss" : (wasWarm ? "warm hit, header ready" : "warm hit, header still loading")); direct URL \(usedDirect ? "yes" : "no") [\(source)]; \(TuneLog.short(url)); moov \(item.moov.map { "\($0)" } ?? "?"), offset \(Int(item.expectedPosition(atMs: Date.nowMs)))s")
 
-        var playerItem = AVPlayerItem(asset: asset)
-        var issuedMs = Date.nowMs
-        var earlySeek: AsyncStream<Bool>?
+        var playerItem = AVPlayerItem(asset: tape.asset)
+        var createdMs = Date.nowMs
         var ready = false
-        let tolerance = CMTime(seconds: 1, preferredTimescale: 600)
+        // A lenient tolerance lets the positioning seek land on a nearby keyframe instead of decoding
+        // from the previous one; the fine sync below corrects anything over a second.
+        let tolerance = CMTime(seconds: 0.75, preferredTimescale: 600)
         for attempt in 0..<2 {
-            if attempt > 0 { playerItem = AVPlayerItem(asset: asset) }
+            if attempt > 0 { playerItem = AVPlayerItem(asset: tape.asset) }
             playerItem.preferredForwardBufferDuration = 8
             phase = .tuning
             clearPicture()
             tapeURL = url
+            currentTape = tape
             video.isMuted = true   // nothing is heard until the picture is shown
             video.replaceCurrentItem(with: playerItem)
             video.volume = tapeVolume
+            createdMs = Date.nowMs
+            tlog("AVPlayerItem created (attempt \(attempt), direct \(usedDirect))")
 
-            // Ask for the broadcast position straight away, before the item is ready, with a lenient
-            // tolerance (an exact seek has to decode from the keyframe before it). If AVFoundation
-            // doesn't honour a seek this early, it is repeated once the item is ready.
-            issuedMs = Date.nowMs
-            let target = item.expectedPosition(atMs: issuedMs) + (wasWarm ? warmStartLag : coldStartLag)
-            earlySeek = beginSeek(on: playerItem, to: target, tolerance: tolerance)
-
-            ready = await waitUntilReady(playerItem, timeout: usedDirect ? 12 : 25)
+            // No seek yet: before the item is ready AVFoundation completes a seek at once without
+            // moving anything, so the position is set right after readyToPlay below.
+            // The range loader has already fetched the moov. Native loading needs more time for it.
+            ready = await waitUntilReady(playerItem, timeout: tape.usesRanges ? 12 : 45)
             guard !Task.isCancelled else { return }
-            if ready || !usedDirect { break }
-            // The direct storage address didn't work: go back to archive.org/download for this item.
+            tlog("item status \(Self.describe(playerItem.status)) (header \(Int(Date.nowMs - createdMs))ms after item created, \(usedDirect ? "direct" : "redirect") [\(source)])")
+            if ready || !tape.usesRanges && !usedDirect { break }
             playerItem.cancelPendingSeeks()
-            warmer.forgetServer(for: url)
-            asset = AVURLAsset(url: url)
+            if tape.usesRanges { TapeLoader.discardHeader(for: url) }
+            if usedDirect { warmer.forgetServer(for: url) }
+            tape = TapeLoader.nativeTape(url: url)
             usedDirect = false
-            wasWarm = false
+            source = "fallback to canonical URL, AVFoundation"
         }
         guard ready else {
             silenceTape()
             phase = .problem("This tape won't play on Apple TV. The next show starts at \(formatClock(item.endMs)).")
+            endTuneSignpost()
             return
         }
+        TuneLog.signposter.emitEvent("readyToPlay")
+        let headerSeconds = (Date.nowMs - createdMs) / 1000
 
         observeEnd(of: playerItem, scheduled: item)
         videoSize = playerItem.presentationSize
         refreshCorrection()
         matchDisplay(to: playerItem, key: item.key)
 
-        var positioned = false
-        if let earlySeek { positioned = await finished(earlySeek, within: 8) }
+        // Position the paused item at the broadcast clock (seekToBroadcast adds the learned seek time).
+        let seekStartedMs = Date.nowMs
+        let positioned = await seekToBroadcast(item, tolerance: tolerance)
         guard !Task.isCancelled, video.currentItem === playerItem else { return }
-        if !positioned {
-            playerItem.cancelPendingSeeks()
-            let recovered = await seekToBroadcast(item, tolerance: tolerance)
-            guard !Task.isCancelled, video.currentItem === playerItem else { return }
-            guard recovered else {
-                silenceTape()
-                phase = .problem("This tape couldn't reach its broadcast position. The next show starts at \(formatClock(item.endMs)).")
-                return
-            }
+        guard positioned else {
+            silenceTape()
+            phase = .problem("This tape couldn't reach its broadcast position. The next show starts at \(formatClock(item.endMs)).")
+            endTuneSignpost()
+            return
         }
+        let seekSeconds = (Date.nowMs - seekStartedMs) / 1000
 
-        // Start at once: don't wait for the buffer to fill (later stalls still rebuffer normally).
+        // The first frame is up at about the right place: start it and take the static away now.
+        // The sound stays off until the fine sync below, and nothing after this puts the static back.
         video.playImmediately(atRate: 1)
+        tlog("playImmediately; showing picture (header \(String(format: "%.2f", headerSeconds))s, seek \(String(format: "%.2f", seekSeconds))s, \(usedDirect ? "direct" : "redirect") [\(source)]; total \(String(format: "%.2f", (Date.nowMs - tuneStartMs) / 1000))s since tune request)")
+        phase = .playing
+        endTuneSignpost()
+        scheduleWarms(delay: 1)
+
         await waitUntilPlaying(video, timeout: 3)
         guard !Task.isCancelled, video.currentItem === playerItem else { return }
 
-        // Next tune from a similar kind of load starts further ahead by what this one really took.
-        let took = (Date.nowMs - issuedMs) / 1000
-        if wasWarm {
-            warmStartLag = min(5, max(0.2, (warmStartLag + took) / 2))
-        } else {
-            coldStartLag = min(15, max(0.5, (coldStartLag + took) / 2))
-        }
-
-        // Check the sync once. Off by more than 0.3 s: one exact seek, which lands in data that is
-        // already buffered, while the static is still up and the sound still off.
+        // Check the sync once. Off by more than a second: one seek with a small tolerance (the picture
+        // keeps showing; the 1 s monitor handles anything still bigger later).
         if video.timeControlStatus == .playing {
             let drift = video.currentTime().seconds - item.expectedPosition(atMs: Date.nowMs)
-            if abs(drift) > 0.3 {
-                await seekToBroadcast(item)
+            tlog("drift check: \(String(format: "%.2f", drift))s")
+            if abs(drift) > 1 {
+                let fine = CMTime(seconds: 0.5, preferredTimescale: 600)
+                await seekToBroadcast(item, tolerance: fine, timeout: 4)
                 guard !Task.isCancelled, video.currentItem === playerItem else { return }
-                video.playImmediately(atRate: 1)
-                await waitUntilPlaying(video, timeout: 2)
-                guard !Task.isCancelled, video.currentItem === playerItem else { return }
+                if video.timeControlStatus != .playing { video.playImmediately(atRate: 1) }
+                tlog("correction seek done, status \(Self.describe(video.timeControlStatus))")
             }
+        } else {
+            tlog("not playing yet (\(Self.describe(video.timeControlStatus))); the monitor will sync it")
         }
         video.isMuted = false
-        phase = .playing
-        scheduleWarms(delay: 1.5)
+        tlog("unmuted; start complete")
     }
 
     // MARK: - Warming
@@ -269,6 +339,7 @@ final class TVPlayer {
 
     private func updateWarms(channel ch: ChannelInfo, item: OnAir, includeNext: Bool) async {
         guard !Task.isCancelled, let store, let engine = store.engine else { return }
+        let began = Date.nowMs
         func stillCurrent() -> Bool { !Task.isCancelled && channel?.id == ch.id && onAir?.key == item.key }
         guard stillCurrent() else { return }
 
@@ -291,15 +362,15 @@ final class TVPlayer {
         }
         guard stillCurrent() else { return }
 
-        var urls: [URL] = []
-        for t in targets {
-            // A very large moov atom (over 8 MB) takes seconds to fetch: not worth warming speculatively.
-            if let moov = t.moov, moov > 8_000_000 { continue }
-            guard let id = t.id, let url = ArchiveMedia.canonicalURL(id: id, file: t.file),
-                  url != tapeURL, !urls.contains(url) else { continue }
-            urls.append(url)
+        var warmTargets: [TapeWarmer.Target] = []
+        for target in targets {
+            if let moov = target.moov, moov > TapeWarmer.maxWarmMoov { continue }
+            guard let id = target.id, let url = ArchiveMedia.canonicalURL(id: id, file: target.file),
+                  url != tapeURL, !warmTargets.contains(where: { $0.canonical == url }) else { continue }
+            warmTargets.append(.init(canonical: url, moov: target.moov))
         }
-        warmer.setWanted(urls)
+        TuneLog.info("[\(ch.id)] updateWarms: \(targets.count) candidates, \(warmTargets.count) to warm, engine lookups took \(Int(Date.nowMs - began))ms")
+        warmer.setWanted(warmTargets)
     }
 
     /// The first tape that starts at or after `ms` on a channel, skipping cards and station breaks.
@@ -311,6 +382,12 @@ final class TVPlayer {
             at = found.endMs + 30
         }
         return nil
+    }
+
+    /// Looks up the storage servers of these tapes in the background, so tuning to them (and the guide
+    /// preview) can load the direct address instead of the redirecting archive.org/download one.
+    func prefetchServers(forIDs ids: [String]) {
+        warmer.prefetchServers(forIDs: ids)
     }
 
     func setFullscreen(_ visible: Bool) {
@@ -366,6 +443,7 @@ final class TVPlayer {
     }
 
     private func clearPicture() {
+        currentTape = nil
         tapeURL = nil
         if !correction.isNone { correction = .none }
         if videoSize != .zero { videoSize = .zero }
@@ -375,16 +453,18 @@ final class TVPlayer {
     /// Exact by default; the first seek of a tune passes a tolerance so it can land on a nearby frame sooner.
     /// Returns whether the seek ran to completion (false if something interrupted it).
     @discardableResult
-    private func seekToBroadcast(_ item: OnAir, tolerance: CMTime = .zero) async -> Bool {
+    private func seekToBroadcast(_ item: OnAir, tolerance: CMTime = .zero, timeout: Double = 8) async -> Bool {
         let started = Date.nowMs
         let target = item.expectedPosition(atMs: Date.nowMs) + seekLag
         guard let playerItem = video.currentItem else { return false }
-        let seek = beginSeek(on: playerItem, to: target, tolerance: tolerance)
-        let done = await finished(seek, within: 8)
+        let seek = beginSeek(on: playerItem, to: target, tolerance: tolerance, label: "sync seek")
+        tlog("sync seek issued to \(Int(target))s (lag \(String(format: "%.1f", seekLag))s, tolerance \(String(format: "%.1f", tolerance.seconds))s)")
+        let done = await finished(seek, within: timeout)
         guard !Task.isCancelled, video.currentItem === playerItem else { return false }
         if !done { playerItem.cancelPendingSeeks() }
         let took = (Date.nowMs - started) / 1000
-        seekLag = min(5, max(0.2, (seekLag + took) / 2))
+        // A seek that stalled on the network says nothing about the next one: cap what it can teach.
+        seekLag = min(2, max(0.2, (seekLag + min(took, 4)) / 2))
         lastCorrectionMs = Date.nowMs
         return done
     }
@@ -392,10 +472,19 @@ final class TVPlayer {
     /// Waits (by observing `status`, no polling) until the item is ready or has failed, or the timeout passes.
     private func waitUntilReady(_ item: AVPlayerItem, timeout: Double) async -> Bool {
         if item.status == .unknown {
-            let statuses = item.publisher(for: \.status)
+            let (updates, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            // Register before racing the timeout and buffer any transition before iteration starts.
+            let observation = item.observe(\.status, options: [.initial, .new]) { item, _ in
+                if item.status != .unknown { continuation.yield(()) }
+            }
+            defer {
+                observation.invalidate()
+                continuation.finish()
+            }
             await withTaskGroup(of: Void.self) { group in
                 group.addTask {
-                    for await status in statuses.values where status != .unknown { return }
+                    var iterator = updates.makeAsyncIterator()
+                    _ = await iterator.next()
                 }
                 group.addTask { try? await Task.sleep(for: .seconds(timeout)) }
                 _ = await group.next()
@@ -407,7 +496,11 @@ final class TVPlayer {
 
     /// Waits until the player reports that it is playing, for at most `timeout` seconds.
     private func waitUntilPlaying(_ player: AVPlayer, timeout: Double) async {
-        guard player.timeControlStatus != .playing else { return }
+        guard player.timeControlStatus != .playing else {
+            tlog("timeControlStatus already playing")
+            return
+        }
+        tlog("waiting for playing: \(Self.describe(player.timeControlStatus)), reason \(player.reasonForWaitingToPlay?.rawValue ?? "none")")
         let statuses = player.publisher(for: \.timeControlStatus)
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
@@ -417,12 +510,17 @@ final class TVPlayer {
             _ = await group.next()
             group.cancelAll()
         }
+        tlog("after waiting: \(Self.describe(player.timeControlStatus)), reason \(player.reasonForWaitingToPlay?.rawValue ?? "none")")
     }
 
-    private func beginSeek(on playerItem: AVPlayerItem, to seconds: Double, tolerance: CMTime) -> AsyncStream<Bool> {
-        AsyncStream { continuation in
+    private func beginSeek(on playerItem: AVPlayerItem, to seconds: Double, tolerance: CMTime, label: String) -> AsyncStream<Bool> {
+        // The completion handler may run on any queue, so it logs on its own clock.
+        let t0 = tuneStartMs
+        let tag = channel?.id ?? "-"
+        return AsyncStream { continuation in
             playerItem.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
                             toleranceBefore: tolerance, toleranceAfter: tolerance) { completed in
+                TuneLog.info("[\(tag) +\(Int(Date.nowMs - t0))ms] \(label) completed=\(completed)")
                 continuation.yield(completed)
                 continuation.finish()
             }
@@ -646,6 +744,9 @@ final class TVPlayer {
             return
         }
         isBuffering = video.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        if isBuffering {
+            TuneLog.debug("[\(channel?.id ?? "-")] buffering: \(video.reasonForWaitingToPlay?.rawValue ?? "none")")
+        }
         // Only while it is really playing: a tape that ended early sits paused at its last frame,
         // and seeking it again would achieve nothing.
         guard !isBuffering, video.timeControlStatus == .playing, Date.nowMs - lastCorrectionMs > 20_000 else { return }

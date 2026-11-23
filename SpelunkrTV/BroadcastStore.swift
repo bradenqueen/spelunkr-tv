@@ -174,6 +174,19 @@ final class BroadcastStore {
             g[ch.id] = await engine.upcoming(channel: ch.id, atMs: now, count: 4)
         }
         guide = g
+        await prefetchServers(engine: engine, at: now)
+    }
+
+    /// Warms the storage-server cache for what is on now across every channel (skips ids already known),
+    /// so the guide preview and channel changes find a direct URL. Runs in the background; never awaited by tuning.
+    private func prefetchServers(engine: ScheduleEngine, at now: Double) async {
+        var ids: [String] = []
+        for ch in watchableChannels {
+            if let onNow = await engine.onAir(channel: ch.id, atMs: now), onNow.isTape, onNow.file != nil, let id = onNow.id {
+                ids.append(id)
+            }
+        }
+        tv.prefetchServers(forIDs: ids)
     }
 
     // MARK: - Grid windows & channel schedules (cached per window)
@@ -211,8 +224,7 @@ final class BroadcastStore {
             detailsInFlight.insert(key)
             defer { detailsInFlight.remove(key) }
             guard let url = URL(string: path, relativeTo: base),
-                  let text = try? await Self.fetchText(url.absoluteURL),
-                  let decoded = try? JSONDecoder().decode(DetailsFile.self, from: Data(text.utf8)) else {
+                  let decoded = try? await Self.fetchDetails(url.absoluteURL) else {
                 continue
             }
             detailsCache[key] = decoded.items
@@ -221,6 +233,11 @@ final class BroadcastStore {
     }
 
     // MARK: - Networking
+
+    private nonisolated static func fetchDetails(_ url: URL) async throws -> DetailsFile {
+        let text = try await fetchText(url)
+        return try JSONDecoder().decode(DetailsFile.self, from: Data(text.utf8))
+    }
 
     nonisolated static func fetchLineup() async throws -> (Lineup, URL) {
         var lastError: Error = URLError(.cannotLoadFromNetwork)
